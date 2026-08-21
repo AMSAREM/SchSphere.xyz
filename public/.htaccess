@@ -1,0 +1,30 @@
+# ====================================================================
+# Apache Rewrite Rules for School Sphere Manager (React SPA Router)
+# Place this file in your XAMPP htdocs/ (or subfolder) alongside index.html
+# ====================================================================
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  
+  # If your application is hosted in a subfolder (e.g. htdocs/school/), 
+  # set RewriteBase to that subfolder path (e.g. RewriteBase /school/)
+  # and update the last rule to: RewriteRule . /school/index.html [L]
+  RewriteBase /
+  
+  RewriteRule ^index\.html$ - [L]
+  
+  # Do not redirect real files or directories
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  
+  # Redirect all other requests to index.html so React Router can render them
+  RewriteRule . /index.html [L]
+</IfModule>
+
+# Disable directory browsing
+Options -Indexes
+
+# Add Gzip compression for faster asset delivery under Apache
+<IfModule mod_deflate.c>
+  AddOutputFilterByType DEFLATE text/html text/plain text/xml text/css text/javascript application/javascript application/json
+</IfModule>

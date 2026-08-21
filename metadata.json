@@ -1,0 +1,6 @@
+{
+  "name": "School Sphere",
+  "description": "A School Management System (School Sphere) designed for Ghanaian schools with logo upload, high-performance results entry and automated sync.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

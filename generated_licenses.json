@@ -1,0 +1,62 @@
+[
+  {
+    "key": "ESEPA-JOHN-STA-HPVQRN",
+    "schoolName": "JOHNSON AND JOHNSON HIGH SCHOOL",
+    "tier": "Standard",
+    "durationMonths": "12",
+    "expiryDate": 1816958564212,
+    "createdAt": 1785854564212,
+    "status": "active",
+    "activeModules": [
+      "students",
+      "academic",
+      "timetable",
+      "attendance",
+      "results",
+      "reports",
+      "fees"
+    ],
+    "syncStatus": "sync_failed",
+    "syncError": "Invalid API key"
+  },
+  {
+    "key": "ESEPA-JOHN-PRE-CBM04I",
+    "schoolName": "JOHNSON AND JOHNSON INTERNATIONAL SCHOOL",
+    "tier": "Premium",
+    "durationMonths": "12",
+    "expiryDate": 1816958568016,
+    "createdAt": 1785854568016,
+    "status": "active",
+    "activeModules": [
+      "students",
+      "academic",
+      "timetable",
+      "attendance",
+      "results",
+      "reports",
+      "fees"
+    ],
+    "syncStatus": "sync_failed",
+    "syncError": "Invalid API key"
+  },
+  {
+    "key": "ESEPA-TEST-STA-123456",
+    "schoolName": "Test Academy",
+    "tier": "Standard",
+    "durationMonths": "12",
+    "expiryDate": null,
+    "createdAt": 1785860171529,
+    "status": "active",
+    "syncStatus": "synced",
+    "syncError": "Table pending initialization on Supabase (saved locally)",
+    "activeModules": [
+      "students",
+      "academic",
+      "timetable",
+      "attendance",
+      "results",
+      "reports",
+      "fees"
+    ]
+  }
+]

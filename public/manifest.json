@@ -1,0 +1,16 @@
+{
+  "name": "School Sphere",
+  "short_name": "School Sphere",
+  "description": "School Management System for Ghana",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#4f46e5",
+  "icons": [
+    {
+      "src": "/sch sphere logo1.png",
+      "sizes": "720x720",
+      "type": "png"
+    }
+  ]
+}

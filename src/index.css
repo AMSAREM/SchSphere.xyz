@@ -1,0 +1,297 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
+  --radius-xl: 1rem;
+  --radius-2xl: 1.5rem;
+  --radius-3xl: 2rem;
+
+  --color-indigo-50: var(--color-indigo-50, #f5f3ff);
+  --color-indigo-100: var(--color-indigo-100, #ede9fe);
+  --color-indigo-200: var(--color-indigo-200, #ddd6fe);
+  --color-indigo-300: var(--color-indigo-300, #c084fc);
+  --color-indigo-400: var(--color-indigo-400, #a855f7);
+  --color-indigo-500: var(--color-indigo-500, #6366f1);
+  --color-indigo-600: var(--color-indigo-600, #4f46e5);
+  --color-indigo-700: var(--color-indigo-700, #4338ca);
+  --color-indigo-800: var(--color-indigo-800, #3730a3);
+  --color-indigo-900: var(--color-indigo-900, #312e81);
+  --color-indigo-950: var(--color-indigo-950, #1e1b4b);
+}
+
+/* Custom Scrollbar for modern feel */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 20px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Hide scrollbar for Chrome, Safari and Opera */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Hide scrollbar for IE, Edge and Firefox */
+.no-scrollbar {
+  -ms-overflow-style: none;  /* IE and Edge */
+  scrollbar-width: none;  /* Firefox */
+}
+
+@media print {
+  @page {
+    margin: 0;
+    size: A4 portrait;
+  }
+
+  body {
+    background: white !important;
+    color: black !important;
+    font-size: 10pt !important;
+    line-height: 1.4 !important;
+    overflow: visible !important;
+  }
+
+  /* Universal Reset for Print */
+  #root, 
+  .app-container,
+  main,
+  .overflow-y-auto,
+  [class*="overflow-y-"],
+  .flex-1,
+  .max-w-7xl,
+  .mx-auto {
+    display: block !important;
+    overflow: visible !important;
+    height: auto !important;
+    min-height: 0 !important;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    position: static !important;
+    box-shadow: none !important;
+    background: white !important;
+    transform: none !important;
+  }
+
+  /* Specific fix for modals/overlays */
+  /* We want to show the container but hide its background/blur */
+  .fixed.inset-0, 
+  [role="dialog"] {
+    display: block !important;
+    position: static !important;
+    background: transparent !important;
+    backdrop-filter: none !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    height: auto !important;
+    width: 100% !important;
+    min-height: 0 !important;
+  }
+
+  /* Target the actual inner modal card */
+  .fixed.inset-0 > div,
+  [role="dialog"] > div {
+    display: block !important;
+    position: static !important;
+    margin: 0 !important;
+    max-width: none !important;
+    width: 100% !important;
+    box-shadow: none !important;
+    border: none !important;
+    background: white !important;
+  }
+
+  /* Ensure the active view is visible and takes full width */
+  main > div {
+    display: block !important;
+    width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  /* Force standard layout for print to avoid grid display issues */
+  .grid {
+    display: block !important;
+  }
+
+  .grid > * {
+    margin-bottom: 1.5rem !important;
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+
+  .print-page-break,
+  .print\:page-break-after-always {
+    page-break-after: always !important;
+    break-after: page !important;
+  }
+
+  /* Hide Non-Printable Elements */
+  aside, 
+  header, 
+  nav, 
+  button, 
+  input,
+  select,
+  .print-hidden,
+  .no-print,
+  #manual-sync,
+  [role="dialog"] button,
+  .only-screen {
+    display: none !important;
+  }
+
+  /* Also hide everything EXCEPT the target modal if printing from one */
+  body.printing-in-progress main > div:not(:has([id*="receipt"], [id*="report"], .ReportCard)) {
+     /* This might be too complex for CSS selectors, rely on generic hiding */
+  }
+
+  /* Hide specifically the backdrop of modals */
+  body.printing-in-progress .bg-slate-900\/60 {
+    background: transparent !important;
+    backdrop-filter: none !important;
+  }
+
+  /* Letterhead Styling */
+  .only-print {
+    display: block !important;
+    text-align: center !important;
+    margin-bottom: 2rem !important;
+    padding-bottom: 1rem !important;
+    border-bottom: 3px double #000 !important;
+  }
+
+  .only-print h1 {
+    font-size: 24pt !important;
+    font-weight: 900 !important;
+    margin-bottom: 4pt !important;
+    letter-spacing: -0.05em !important;
+  }
+
+  /* Table Professionalism - Scoped to avoid breaking custom components */
+  table:not(.no-print-reset) {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    margin-bottom: 1rem !important;
+  }
+
+  table:not(.no-print-reset) th, 
+  table:not(.no-print-reset) td {
+    border-bottom: 1px solid #ccc !important;
+    padding: 8pt 4pt !important;
+    text-align: left !important;
+  }
+
+  table:not(.no-print-reset) thead {
+    display: table-header-group !important;
+    background-color: #f8fafc !important;
+  }
+
+  table:not(.no-print-reset) th {
+    font-weight: bold !important;
+    text-transform: uppercase !important;
+    font-size: 9pt !important;
+  }
+
+  /* Avoid cutting off cards or sections */
+  .bg-white:not(.ReportCard), 
+  .rounded-2xl:not(.ReportCard), 
+  section:not(.ReportCard-section) {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+    margin-bottom: 2rem !important;
+    border: 1px solid #eee !important;
+    border-radius: 8pt !important;
+  }
+
+  .ReportCard {
+    display: flex !important;
+    flex-direction: column !important;
+    page-break-after: always !important;
+    break-after: page !important;
+    margin: 0 !important;
+    border-radius: 0 !important;
+    width: 210mm !important;
+    height: 297mm !important;
+    padding: 10mm !important;
+    overflow: hidden !important;
+    position: relative !important;
+    box-sizing: border-box !important;
+    background: white !important;
+    /* Restore the border */
+    border: 8pt double #312e81 !important; /* indigo-900 */
+    left: 0 !important;
+    top: 0 !important;
+  }
+
+  /* Reset any container interference */
+  body.printing-in-progress #batch-reports-content,
+  #batch-reports-content {
+    display: block !important;
+    width: 210mm !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    text-align: left !important;
+  }
+
+  /* Target the specific wrapper to avoid offset */
+  #batch-reports-content > div {
+    display: block !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 210mm !important;
+  }
+
+  /* Specific Components */
+  canvas {
+    max-width: 100% !important;
+    height: auto !important;
+  }
+
+  .recharts-responsive-container {
+    width: 100% !important;
+    height: 400px !important;
+  }
+
+  /* Force Colors */
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+}
+
+.only-print {
+  display: none;
+}
+
+@layer base {
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+  
+  body {
+    @apply antialiased text-slate-900;
+  }
+}
+
+@utility sharpen-image {
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
+}
+

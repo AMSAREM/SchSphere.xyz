@@ -1,0 +1,364 @@
+{
+  "students": [
+    {
+      "id": 4,
+      "studentId": "STU001",
+      "firstName": "John",
+      "lastName": "Doe",
+      "class": "Primary 3",
+      "dateOfBirth": "2018-05-15",
+      "gender": "Male",
+      "guardianName": "Jane Doe",
+      "guardianPhone": "+1234567890",
+      "feesPaid": 5000,
+      "totalFees": 10000,
+      "house": null,
+      "department": null,
+      "photo": null,
+      "createdAt": 1786498686,
+      "feeBreakdown": null,
+      "feePaidBreakdown": null,
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    },
+    {
+      "id": 5,
+      "studentId": "STU002",
+      "firstName": "Jane",
+      "lastName": "Smith",
+      "class": "Primary 5",
+      "dateOfBirth": "2017-06-20",
+      "gender": "Female",
+      "guardianName": "John Smith",
+      "guardianPhone": "+1234567891",
+      "feesPaid": 7500,
+      "totalFees": 10000,
+      "house": null,
+      "department": null,
+      "photo": null,
+      "createdAt": 1786498686,
+      "feeBreakdown": null,
+      "feePaidBreakdown": null,
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    },
+    {
+      "id": 6,
+      "studentId": "STU003",
+      "firstName": "Bob",
+      "lastName": "Johnson",
+      "class": "JHS 1",
+      "dateOfBirth": "2015-03-10",
+      "gender": "Male",
+      "guardianName": "Mary Johnson",
+      "guardianPhone": "+1234567892",
+      "feesPaid": 3000,
+      "totalFees": 10000,
+      "house": null,
+      "department": null,
+      "photo": null,
+      "createdAt": 1786498686,
+      "feeBreakdown": null,
+      "feePaidBreakdown": null,
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    },
+    {
+      "id": 7,
+      "studentId": "STU004",
+      "firstName": "Alice",
+      "lastName": "Williams",
+      "class": "SHS 1",
+      "dateOfBirth": "2013-02-25",
+      "gender": "Female",
+      "guardianName": "Robert Williams",
+      "guardianPhone": "+1234567893",
+      "feesPaid": 6000,
+      "totalFees": 10000,
+      "house": null,
+      "department": null,
+      "photo": null,
+      "createdAt": 1786498686,
+      "feeBreakdown": null,
+      "feePaidBreakdown": null,
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    },
+    {
+      "id": 8,
+      "studentId": "STU005",
+      "firstName": "Charlie",
+      "lastName": "Brown",
+      "class": "Primary 6",
+      "dateOfBirth": "2018-08-10",
+      "gender": "Male",
+      "guardianName": "Sarah Brown",
+      "guardianPhone": "+1234567894",
+      "feesPaid": 2000,
+      "totalFees": 10000,
+      "house": null,
+      "department": null,
+      "photo": null,
+      "createdAt": 1786498686,
+      "feeBreakdown": null,
+      "feePaidBreakdown": null,
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    }
+  ],
+  "attendance": [],
+  "results": [],
+  "subjects": [],
+  "classes": [
+    {
+      "id": 3,
+      "name": "Primary 3",
+      "level": "Primary",
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    },
+    {
+      "id": 5,
+      "name": "Primary 5",
+      "level": "Primary",
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    },
+    {
+      "id": 6,
+      "name": "Primary 6",
+      "level": "Primary",
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    },
+    {
+      "id": 7,
+      "name": "JHS 1",
+      "level": "Junior High",
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    },
+    {
+      "id": 8,
+      "name": "JHS 2",
+      "level": "Junior High",
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    },
+    {
+      "id": 9,
+      "name": "JHS 3",
+      "level": "Junior High",
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    },
+    {
+      "id": 10,
+      "name": "SHS 1",
+      "level": "Senior High",
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    },
+    {
+      "id": 11,
+      "name": "SHS 2",
+      "level": "Senior High",
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    },
+    {
+      "id": 12,
+      "name": "SHS 3",
+      "level": "Senior High",
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    }
+  ],
+  "teachers": [
+    {
+      "id": 21,
+      "staffId": "TEA-1234-1786396821001",
+      "firstName": "Test",
+      "lastName": "Teacher",
+      "phone": "1234567890",
+      "email": "test@test.com",
+      "assignedClasses": [],
+      "subjects": [],
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    }
+  ],
+  "termReports": [],
+  "settings": [
+    {
+      "id": 1,
+      "key": "timetable_slots",
+      "value": [
+        {
+          "id": "sample-1",
+          "day": "Monday",
+          "room": "Room A",
+          "classId": "JHS 1",
+          "endTime": "09:00",
+          "startTime": "08:00",
+          "subjectName": "Mathematics",
+          "teacherName": "Mr. Kwame Boateng"
+        },
+        {
+          "id": "sample-2",
+          "day": "Monday",
+          "room": "Room A",
+          "classId": "JHS 1",
+          "endTime": "10:00",
+          "startTime": "09:00",
+          "subjectName": "Integrated Science",
+          "teacherName": "Mrs. Janet Antwi"
+        },
+        {
+          "id": "sample-3",
+          "day": "Monday",
+          "room": "Room A",
+          "classId": "JHS 1",
+          "endTime": "11:30",
+          "startTime": "10:30",
+          "subjectName": "Social Studies",
+          "teacherName": "Mr. Kpodo Kafui"
+        },
+        {
+          "id": "sample-4",
+          "day": "Monday",
+          "room": "ICT Suite",
+          "classId": "JHS 1",
+          "endTime": "12:30",
+          "startTime": "11:30",
+          "subjectName": "ICT & Computing",
+          "teacherName": "Mr. John Dumelo"
+        },
+        {
+          "id": "sample-5",
+          "day": "Monday",
+          "room": "Room B",
+          "classId": "JHS 2",
+          "endTime": "10:00",
+          "startTime": "09:00",
+          "subjectName": "Mathematics",
+          "teacherName": "Mr. Kwame Boateng"
+        },
+        {
+          "id": "sample-6",
+          "day": "Tuesday",
+          "room": "Room B",
+          "classId": "JHS 2",
+          "endTime": "09:15",
+          "startTime": "08:00",
+          "subjectName": "English Language",
+          "teacherName": "Miss Sarah Mensah"
+        },
+        {
+          "id": "sample-7",
+          "day": "Wednesday",
+          "room": "Room A",
+          "classId": "JHS 1",
+          "endTime": "12:00",
+          "startTime": "11:00",
+          "subjectName": "Religious & Moral Educ (RME)",
+          "teacherName": "Rev. Albert Ocran"
+        }
+      ],
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    },
+    {
+      "id": 2,
+      "key": "timetable_suggestions",
+      "value": [],
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    },
+    {
+      "id": 3,
+      "key": "customFeeTypes",
+      "value": [],
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    },
+    {
+      "id": 6,
+      "key": "academicYear",
+      "value": {
+        "currentTerm": "Term 1",
+        "currentYear": "2026/2027",
+        "termStartDate": 1786143766242
+      },
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    },
+    {
+      "id": 7,
+      "key": "licenseInfo",
+      "value": {
+        "tier": "Standard",
+        "active": true,
+        "expiryDate": 1793919626738,
+        "licenseKey": "ESEPA-FLOW-STA-IIS2TG",
+        "schoolName": "FLOWER SCHOOL",
+        "activeModules": [
+          "students",
+          "academic",
+          "timetable",
+          "attendance",
+          "results",
+          "exam_analysis",
+          "reports",
+          "fees",
+          "siren",
+          "evoting",
+          "inventory"
+        ]
+      },
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    },
+    {
+      "id": 4,
+      "key": "schoolProfile",
+      "value": {
+        "logo": "https://cdn.pixabay.com/photo/2016/10/06/19/03/graduation-cap-1719744_1280.png",
+        "schoolName": "3",
+        "schoolEmail": "info@schoolsphere.edu.gh",
+        "schoolPhone": "+233 24 000 0000",
+        "schoolAddress": "Accra, Ghana"
+      },
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    },
+    {
+      "id": 5,
+      "key": "academicConfig",
+      "value": {
+        "currentTerm": "Term 1",
+        "academicYear": "2026/2027",
+        "nextTermBegins": "2026-09-08"
+      },
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3"
+    }
+  ],
+  "users": [
+    {
+      "id": 18,
+      "username": "creator",
+      "passwordHash": "SUPABASE_AUTH",
+      "fullName": "SchoolSphere Creator",
+      "role": "super_admin",
+      "createdAt": 1786496405,
+      "school_id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3",
+      "auth_user_id": "17d51439-78be-437d-8ea3-a0ca4f59c713"
+    }
+  ],
+  "examAnalysis": [],
+  "smsLogs": [],
+  "polls": [],
+  "candidates": [],
+  "votes": [],
+  "promotionHistory": [],
+  "inventory": [],
+  "expenses": [],
+  "licenses": [],
+  "schools": [
+    {
+      "id": "fca16e63-4259-4de7-aae1-8b4432ea0ea3",
+      "name": "SCHOOL SPHERE ACADEMY",
+      "slug": "school-sphere-academy",
+      "license_id": null,
+      "email": null,
+      "phone": null,
+      "address": null,
+      "logo_url": "https://cdn.pixabay.com/photo/2016/10/06/19/03/graduation-cap-1719744_1280.png",
+      "theme": "indigo",
+      "academic_year": "2026/2027",
+      "current_term": "Term 1",
+      "created_at": 1786011276169,
+      "updated_at": 1786011276169,
+      "status": "active"
+    }
+  ]
+}
