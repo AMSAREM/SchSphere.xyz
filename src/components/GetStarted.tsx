@@ -155,6 +155,13 @@ export default function GetStarted({
   const [setupAdminConfirmPass, setSetupAdminConfirmPass] = useState<string>('');
   const [setupAdminError, setSetupAdminError] = useState<string>('');
 
+  // Magic Link Onboarding Mode
+  const [activationMode, setActivationMode] = useState<'magic_link' | 'password'>('magic_link');
+  const [magicLinkSent, setMagicLinkSent] = useState<boolean>(false);
+  const [magicSentEmail, setMagicSentEmail] = useState<string>('');
+  const [magicActionLink, setMagicActionLink] = useState<string | null>(null);
+  const [provisionedSession, setProvisionedSession] = useState<{ user: any; token: string } | null>(null);
+
   // Additional Interactive States
   const [showAbout, setShowAbout] = useState<boolean>(false);
   const [showContact, setShowContact] = useState<boolean>(false);
@@ -365,6 +372,62 @@ export default function GetStarted({
       setActivationError("Invalid activation key. Please enter a valid serial key.");
     }
     setActivating(false);
+  };
+
+  // Passwordless Supabase Magic Link Onboarding
+  const handleMagicActivation = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!licenseInput.trim()) {
+      setActivationError("Please enter a valid license key.");
+      return;
+    }
+    if (!setupAdminEmail.trim() || !setupAdminEmail.includes('@')) {
+      setActivationError("Please enter a valid institutional administrator email address.");
+      return;
+    }
+    if (licenseValidation.checked && licenseValidation.used) {
+      setActivationError(`This license key has already been used and activated for "${licenseValidation.schoolName || 'another school'}". License keys are strictly single-use.`);
+      return;
+    }
+
+    setActivating(true);
+    setActivationError('');
+
+    try {
+      const res = await fetch('/api/license/onboard-magic', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          licenseKey: licenseInput.trim().toUpperCase(),
+          email: setupAdminEmail.trim().toLowerCase(),
+          fullName: setupAdminName.trim() || 'Head Administrator',
+          schoolName: setupSchoolName.trim() || 'SCHOOL SPHERE ACADEMY',
+          schoolPhone: setupSchoolPhone.trim() || '+233 24 000 0000',
+          academicYear: setupAcademicYear.trim() || '2026/2027',
+          currentTerm: setupCurrentTerm.trim() || 'Term 1',
+          redirectUrl: window.location.origin
+        })
+      });
+
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.success) {
+        setMagicSentEmail(setupAdminEmail.trim().toLowerCase());
+        setMagicLinkSent(true);
+        if (data.license) {
+          localStorage.setItem('esepa_active_license', JSON.stringify(data.license));
+        }
+        if (data.school) {
+          localStorage.setItem('esepa_active_school', JSON.stringify(data.school));
+        }
+        showToast("Magic Link sent to your email! Please check your inbox to sign in.", "success");
+      } else {
+        setActivationError(data?.error || "Failed to dispatch magic link. Please check your credentials.");
+      }
+    } catch (err: any) {
+      setActivationError("Network error sending magic link: " + (err.message || "Unknown error"));
+    } finally {
+      setActivating(false);
+    }
   };
 
   // Complete multi-step setup wizard
@@ -1142,214 +1205,314 @@ export default function GetStarted({
                     </div>
                     <div>
                       <h2 className="text-base font-black text-slate-900 uppercase tracking-tight">School Activation & Admin Setup</h2>
-                      <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Option B: Activate License & Set Up Master Admin in One Step</p>
+                      <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Option B: Activate License & Provision Master Admin</p>
                     </div>
                   </div>
 
-                  <p className="text-xs text-slate-600 leading-relaxed bg-slate-50 p-4 border border-slate-200/80 rounded-2xl">
-                    {lockAnnouncement || "Enter your issued Software License Key and configure your Head Admin login to activate your school instance live in the database."}
-                  </p>
-
-                  <form onSubmit={handleActivate} className="space-y-4">
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <label className="text-[10px] font-extrabold text-slate-600 uppercase tracking-widest block ml-1">
-                          1. System License Key <span className="text-rose-500">*</span>
-                        </label>
-                        <span className="text-[9px] font-bold uppercase tracking-wider text-indigo-600">
-                          Single-Use Token
-                        </span>
+                  {magicLinkSent ? (
+                    <div className="bg-emerald-50 border border-emerald-200/80 rounded-2xl p-6 text-center space-y-4 animate-in fade-in zoom-in-95 duration-200">
+                      <div className="w-12 h-12 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto shadow-inner">
+                        <Mail className="w-6 h-6" />
                       </div>
-                      <input
-                        type="text"
-                        placeholder="ESEPA-XXXX-XXXX-XXXX"
-                        value={licenseInput}
-                        onChange={(e) => setLicenseInput(e.target.value)}
-                        className={cn(
-                          "w-full px-4 py-3 bg-slate-50 border rounded-xl text-center font-mono text-sm font-black tracking-widest uppercase transition",
-                          licenseValidation.checked && licenseValidation.used
-                            ? "border-amber-400 bg-amber-50/40 text-amber-800 focus:border-amber-500"
-                            : licenseValidation.checked && licenseValidation.valid && !licenseValidation.used
-                            ? "border-emerald-400 bg-emerald-50/40 text-emerald-800 focus:border-emerald-500"
-                            : "border-slate-200 text-indigo-600 focus:border-indigo-500 focus:bg-white"
-                        )}
-                        required
-                      />
+                      <div>
+                        <h3 className="text-base font-black text-emerald-900 uppercase tracking-tight">
+                          Magic Sign-In Link Sent!
+                        </h3>
+                        <p className="text-xs text-emerald-700 font-medium mt-1.5 max-w-md mx-auto leading-relaxed">
+                          We provisioned your school tenant with Administrator privileges and sent an authentication link to:
+                        </p>
+                        <div className="inline-block mt-2 px-3 py-1.5 bg-emerald-100/70 border border-emerald-300 rounded-xl font-mono text-xs font-bold text-emerald-900">
+                          {magicSentEmail}
+                        </div>
+                      </div>
 
-                      {/* Live License Key Validation Indicators */}
-                      {licenseValidation.checking && (
-                        <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500 mt-1 ml-1 animate-pulse">
-                          <RefreshCcw className="w-3.5 h-3.5 animate-spin text-indigo-500" />
-                          <span>Checking license key against central database...</span>
-                        </div>
-                      )}
-                      {licenseValidation.checked && licenseValidation.valid && !licenseValidation.used && (
-                        <div className="flex items-center gap-1.5 text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xl mt-1">
+                      <div className="bg-white/80 border border-emerald-200 rounded-xl p-4 text-left text-xs text-slate-700 space-y-2">
+                        <div className="flex items-center gap-2 font-bold text-slate-900">
                           <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                          <span>✓ Verified Valid & Unused License Key ({licenseValidation.tier})</span>
+                          <span>What happens next:</span>
                         </div>
-                      )}
-                      {licenseValidation.checked && licenseValidation.used && (
-                        <div className="flex items-start gap-1.5 text-[11px] font-bold text-amber-800 bg-amber-50 border border-amber-300 px-3 py-2 rounded-xl mt-1">
-                          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                          <div>
-                            <span className="block font-black">⚠️ License Key Already Used</span>
-                            <span className="text-[10px] font-medium text-amber-700">
-                              This serial key has already been activated for "{licenseValidation.schoolName || 'another institution'}". License keys are strictly single-use and cannot be activated again.
+                        <ol className="list-decimal list-inside space-y-1 text-slate-600 pl-1 text-[11px]">
+                          <li>Open the inbox for <strong className="text-slate-800">{magicSentEmail}</strong>.</li>
+                          <li>Click the <strong>"Sign in to School Sphere"</strong> button in the email.</li>
+                          <li>You will automatically be signed in with full Admin permissions and your school dashboard initialized!</li>
+                        </ol>
+                      </div>
+
+                      <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
+                        <button
+                          type="button"
+                          onClick={(e) => handleMagicActivation(e)}
+                          disabled={activating}
+                          className="w-full sm:w-auto px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold uppercase tracking-wider cursor-pointer shadow-md disabled:opacity-50"
+                        >
+                          {activating ? "Resending Link..." : "Resend Magic Link"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMagicLinkSent(false);
+                            onActivationSuccess();
+                          }}
+                          className="w-full sm:w-auto px-5 py-2.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded-xl text-xs font-bold uppercase tracking-wider cursor-pointer"
+                        >
+                          Go to Login Screen
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <p className="text-xs text-slate-600 leading-relaxed bg-slate-50 p-4 border border-slate-200/80 rounded-2xl">
+                        {lockAnnouncement || "Enter your issued Software License Key and configure your administrator account to activate your school instance live in the database."}
+                      </p>
+
+                      {/* Onboarding Method Switcher */}
+                      <div className="flex rounded-xl p-1 bg-slate-100 border border-slate-200 text-xs font-bold">
+                        <button
+                          type="button"
+                          onClick={() => setActivationMode('magic_link')}
+                          className={cn(
+                            "flex-1 py-2 px-3 rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer",
+                            activationMode === 'magic_link'
+                              ? "bg-white text-indigo-700 shadow-sm border border-slate-200/60 font-black"
+                              : "text-slate-600 hover:text-slate-900"
+                          )}
+                        >
+                          <Sparkles className="w-3.5 h-3.5 text-indigo-500" />
+                          <span>Passwordless Magic Link</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setActivationMode('password')}
+                          className={cn(
+                            "flex-1 py-2 px-3 rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer",
+                            activationMode === 'password'
+                              ? "bg-white text-indigo-700 shadow-sm border border-slate-200/60 font-black"
+                              : "text-slate-600 hover:text-slate-900"
+                          )}
+                        >
+                          <Key className="w-3.5 h-3.5 text-slate-500" />
+                          <span>Direct Password Setup</span>
+                        </button>
+                      </div>
+
+                      <form onSubmit={activationMode === 'magic_link' ? handleMagicActivation : handleActivate} className="space-y-4">
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <label className="text-[10px] font-extrabold text-slate-600 uppercase tracking-widest block ml-1">
+                              1. System License Key <span className="text-rose-500">*</span>
+                            </label>
+                            <span className="text-[9px] font-bold uppercase tracking-wider text-indigo-600">
+                              Single-Use Token
                             </span>
                           </div>
-                        </div>
-                      )}
-                      {licenseValidation.checked && !licenseValidation.valid && !licenseValidation.checking && (
-                        <div className="flex items-center gap-1.5 text-[11px] font-bold text-rose-600 bg-rose-50 border border-rose-200 px-3 py-1.5 rounded-xl mt-1">
-                          <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
-                          <span>{licenseValidation.error || "Invalid license key format or key not found in registry."}</span>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="bg-slate-50/70 p-4 rounded-2xl border border-slate-200/90 space-y-3.5">
-                      <div className="flex items-center gap-2 border-b border-slate-200/60 pb-2">
-                        <Shield className="w-4 h-4 text-indigo-600" />
-                        <h3 className="text-xs font-black text-slate-800 uppercase tracking-wider">2. Head Administrator Setup</h3>
-                      </div>
-
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <div className="space-y-1">
-                          <label className="text-[9px] font-black uppercase tracking-wider text-slate-500">School / Academy Name</label>
                           <input
                             type="text"
-                            placeholder="e.g. Accra Academy"
-                            value={setupSchoolName}
-                            onChange={(e) => setSetupSchoolName(e.target.value)}
-                            className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:border-indigo-500"
-                          />
-                        </div>
-
-                        <div className="space-y-1">
-                          <label className="text-[9px] font-black uppercase tracking-wider text-slate-500">Official Phone Number <span className="text-rose-500">*</span></label>
-                          <input
-                            type="tel"
-                            placeholder="e.g. +233 24 123 4567"
-                            value={setupSchoolPhone}
-                            onChange={(e) => setSetupSchoolPhone(e.target.value)}
-                            className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:border-indigo-500"
+                            placeholder="ESEPA-XXXX-XXXX-XXXX"
+                            value={licenseInput}
+                            onChange={(e) => setLicenseInput(e.target.value)}
+                            className={cn(
+                              "w-full px-4 py-3 bg-slate-50 border rounded-xl text-center font-mono text-sm font-black tracking-widest uppercase transition",
+                              licenseValidation.checked && licenseValidation.used
+                                ? "border-amber-400 bg-amber-50/40 text-amber-800 focus:border-amber-500"
+                                : licenseValidation.checked && licenseValidation.valid && !licenseValidation.used
+                                ? "border-emerald-400 bg-emerald-50/40 text-emerald-800 focus:border-emerald-500"
+                                : "border-slate-200 text-indigo-600 focus:border-indigo-500 focus:bg-white"
+                            )}
                             required
                           />
-                        </div>
-                      </div>
 
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <div className="space-y-1">
-                          <label className="text-[9px] font-black uppercase tracking-wider text-slate-500">Academic Year <span className="text-rose-500">*</span></label>
-                          <input
-                            type="text"
-                            placeholder="e.g. 2026/2027"
-                            value={setupAcademicYear}
-                            onChange={(e) => setSetupAcademicYear(e.target.value)}
-                            className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:border-indigo-500"
-                            required
-                          />
-                        </div>
-
-                        <div className="space-y-1">
-                          <label className="text-[9px] font-black uppercase tracking-wider text-slate-500">Current Term / Semester <span className="text-rose-500">*</span></label>
-                          <select
-                            value={setupCurrentTerm}
-                            onChange={(e) => setSetupCurrentTerm(e.target.value)}
-                            className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:border-indigo-500"
-                          >
-                            <option value="Term 1">Term 1</option>
-                            <option value="Term 2">Term 2</option>
-                            <option value="Term 3">Term 3</option>
-                            <option value="Semester 1">Semester 1</option>
-                            <option value="Semester 2">Semester 2</option>
-                          </select>
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <div className="space-y-1">
-                          <label className="text-[9px] font-black uppercase tracking-wider text-slate-500">Head Admin Full Name</label>
-                          <input
-                            type="text"
-                            placeholder="e.g. Principal Elena Mensah"
-                            value={setupAdminName}
-                            onChange={(e) => setSetupAdminName(e.target.value)}
-                            className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:border-indigo-500"
-                          />
+                          {/* Live License Key Validation Indicators */}
+                          {licenseValidation.checking && (
+                            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500 mt-1 ml-1 animate-pulse">
+                              <RefreshCcw className="w-3.5 h-3.5 animate-spin text-indigo-500" />
+                              <span>Checking license key against central database...</span>
+                            </div>
+                          )}
+                          {licenseValidation.checked && licenseValidation.valid && !licenseValidation.used && (
+                            <div className="flex items-center gap-1.5 text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xl mt-1">
+                              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                              <span>✓ Verified Valid & Unused License Key ({licenseValidation.tier})</span>
+                            </div>
+                          )}
+                          {licenseValidation.checked && licenseValidation.used && (
+                            <div className="flex items-start gap-1.5 text-[11px] font-bold text-amber-800 bg-amber-50 border border-amber-300 px-3 py-2 rounded-xl mt-1">
+                              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                              <div>
+                                <span className="block font-black">⚠️ License Key Already Used</span>
+                                <span className="text-[10px] font-medium text-amber-700">
+                                  This serial key has already been activated for "{licenseValidation.schoolName || 'another institution'}". License keys are strictly single-use and cannot be activated again.
+                                </span>
+                              </div>
+                            </div>
+                          )}
+                          {licenseValidation.checked && !licenseValidation.valid && !licenseValidation.checking && (
+                            <div className="flex items-center gap-1.5 text-[11px] font-bold text-rose-600 bg-rose-50 border border-rose-200 px-3 py-1.5 rounded-xl mt-1">
+                              <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
+                              <span>{licenseValidation.error || "Invalid license key format or key not found in registry."}</span>
+                            </div>
+                          )}
                         </div>
 
-                        <div className="space-y-1">
-                          <label className="text-[9px] font-black uppercase tracking-wider text-slate-500">Admin Email</label>
-                          <input
-                            type="email"
-                            placeholder="e.g. admin@school.edu.gh"
-                            value={setupAdminEmail}
-                            onChange={(e) => setSetupAdminEmail(e.target.value)}
-                            className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:border-indigo-500"
-                          />
+                        <div className="bg-slate-50/70 p-4 rounded-2xl border border-slate-200/90 space-y-3.5">
+                          <div className="flex items-center gap-2 border-b border-slate-200/60 pb-2">
+                            <Shield className="w-4 h-4 text-indigo-600" />
+                            <h3 className="text-xs font-black text-slate-800 uppercase tracking-wider">2. School & Administrator Details</h3>
+                          </div>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div className="space-y-1">
+                              <label className="text-[9px] font-black uppercase tracking-wider text-slate-500">School / Academy Name</label>
+                              <input
+                                type="text"
+                                placeholder="e.g. Accra Academy"
+                                value={setupSchoolName}
+                                onChange={(e) => setSetupSchoolName(e.target.value)}
+                                className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:border-indigo-500"
+                              />
+                            </div>
+
+                            <div className="space-y-1">
+                              <label className="text-[9px] font-black uppercase tracking-wider text-slate-500">Official Phone Number <span className="text-rose-500">*</span></label>
+                              <input
+                                type="tel"
+                                placeholder="e.g. +233 24 123 4567"
+                                value={setupSchoolPhone}
+                                onChange={(e) => setSetupSchoolPhone(e.target.value)}
+                                className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:border-indigo-500"
+                                required
+                              />
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div className="space-y-1">
+                              <label className="text-[9px] font-black uppercase tracking-wider text-slate-500">Academic Year <span className="text-rose-500">*</span></label>
+                              <input
+                                type="text"
+                                placeholder="e.g. 2026/2027"
+                                value={setupAcademicYear}
+                                onChange={(e) => setSetupAcademicYear(e.target.value)}
+                                className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:border-indigo-500"
+                                required
+                              />
+                            </div>
+
+                            <div className="space-y-1">
+                              <label className="text-[9px] font-black uppercase tracking-wider text-slate-500">Current Term / Semester <span className="text-rose-500">*</span></label>
+                              <select
+                                value={setupCurrentTerm}
+                                onChange={(e) => setSetupCurrentTerm(e.target.value)}
+                                className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:border-indigo-500"
+                              >
+                                <option value="Term 1">Term 1</option>
+                                <option value="Term 2">Term 2</option>
+                                <option value="Term 3">Term 3</option>
+                                <option value="Semester 1">Semester 1</option>
+                                <option value="Semester 2">Semester 2</option>
+                              </select>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div className="space-y-1">
+                              <label className="text-[9px] font-black uppercase tracking-wider text-slate-500">Head Admin Full Name</label>
+                              <input
+                                type="text"
+                                placeholder="e.g. Principal Elena Mensah"
+                                value={setupAdminName}
+                                onChange={(e) => setSetupAdminName(e.target.value)}
+                                className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:border-indigo-500"
+                              />
+                            </div>
+
+                            <div className="space-y-1">
+                              <label className="text-[9px] font-black uppercase tracking-wider text-slate-500">Admin Email {activationMode === 'magic_link' && <span className="text-rose-500">*</span>}</label>
+                              <input
+                                type="email"
+                                placeholder="e.g. admin@school.edu.gh"
+                                value={setupAdminEmail}
+                                onChange={(e) => setSetupAdminEmail(e.target.value)}
+                                className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:border-indigo-500"
+                                required={activationMode === 'magic_link'}
+                              />
+                            </div>
+                          </div>
+
+                          {activationMode === 'password' && (
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1 border-t border-slate-200/50">
+                              <div className="space-y-1">
+                                <label className="text-[9px] font-black uppercase tracking-wider text-slate-500">Admin Username <span className="text-rose-500">*</span></label>
+                                <input
+                                  type="text"
+                                  placeholder="e.g. admin"
+                                  value={setupAdminUser}
+                                  onChange={(e) => setSetupAdminUser(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))}
+                                  className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl font-mono text-xs font-bold text-slate-800 focus:outline-none focus:border-indigo-500"
+                                  required
+                                />
+                              </div>
+
+                              <div className="space-y-1">
+                                <label className="text-[9px] font-black uppercase tracking-wider text-slate-500">Master Password <span className="text-rose-500">*</span></label>
+                                <input
+                                  type="password"
+                                  placeholder="••••••••"
+                                  value={setupAdminPass}
+                                  onChange={(e) => setSetupAdminPass(e.target.value)}
+                                  className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:border-indigo-500"
+                                  required
+                                />
+                              </div>
+
+                              <div className="space-y-1">
+                                <label className="text-[9px] font-black uppercase tracking-wider text-slate-500">Confirm Password <span className="text-rose-500">*</span></label>
+                                <input
+                                  type="password"
+                                  placeholder="••••••••"
+                                  value={setupAdminConfirmPass}
+                                  onChange={(e) => setSetupAdminConfirmPass(e.target.value)}
+                                  className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:border-indigo-500"
+                                  required
+                                />
+                              </div>
+                            </div>
+                          )}
                         </div>
-                      </div>
 
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                        <div className="space-y-1">
-                          <label className="text-[9px] font-black uppercase tracking-wider text-slate-500">Admin Username <span className="text-rose-500">*</span></label>
-                          <input
-                            type="text"
-                            placeholder="e.g. admin"
-                            value={setupAdminUser}
-                            onChange={(e) => setSetupAdminUser(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))}
-                            className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl font-mono text-xs font-bold text-slate-800 focus:outline-none focus:border-indigo-500"
-                            required
-                          />
-                        </div>
+                        {activationError && (
+                          <p className="text-xs text-rose-600 font-semibold bg-rose-50 border border-rose-200 p-3 rounded-xl">
+                            {activationError}
+                          </p>
+                        )}
 
-                        <div className="space-y-1">
-                          <label className="text-[9px] font-black uppercase tracking-wider text-slate-500">Master Password <span className="text-rose-500">*</span></label>
-                          <input
-                            type="password"
-                            placeholder="••••••••"
-                            value={setupAdminPass}
-                            onChange={(e) => setSetupAdminPass(e.target.value)}
-                            className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:border-indigo-500"
-                            required
-                          />
-                        </div>
-
-                        <div className="space-y-1">
-                          <label className="text-[9px] font-black uppercase tracking-wider text-slate-500">Confirm Password <span className="text-rose-500">*</span></label>
-                          <input
-                            type="password"
-                            placeholder="••••••••"
-                            value={setupAdminConfirmPass}
-                            onChange={(e) => setSetupAdminConfirmPass(e.target.value)}
-                            className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:border-indigo-500"
-                            required
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    {activationError && (
-                      <p className="text-xs text-rose-600 font-semibold bg-rose-50 border border-rose-200 p-3 rounded-xl">
-                        {activationError}
-                      </p>
-                    )}
-
-                    <button
-                      type="submit"
-                      disabled={activating || (licenseValidation.checked && licenseValidation.used)}
-                      className="w-full py-3.5 bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-500 hover:to-indigo-600 active:scale-[0.98] transition-all rounded-xl text-xs font-black uppercase tracking-wider text-white shadow-lg shadow-indigo-500/10 cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2"
-                    >
-                      <Sparkles className="w-4 h-4 text-emerald-300" />
-                      {activating 
-                        ? "Activating School in Database..." 
-                        : licenseValidation.checked && licenseValidation.used 
-                        ? "License Already Used (Single-Use Only)" 
-                        : "Activate School & Complete Setup"}
-                    </button>
-                  </form>
+                        <button
+                          type="submit"
+                          disabled={activating || (licenseValidation.checked && licenseValidation.used)}
+                          className="w-full py-3.5 bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-500 hover:to-indigo-600 active:scale-[0.98] transition-all rounded-xl text-xs font-black uppercase tracking-wider text-white shadow-lg shadow-indigo-500/10 cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2"
+                        >
+                          {activationMode === 'magic_link' ? (
+                            <>
+                              <Mail className="w-4 h-4 text-emerald-300" />
+                              {activating 
+                                ? "Provisioning Tenant & Sending Magic Link..." 
+                                : licenseValidation.checked && licenseValidation.used 
+                                ? "License Already Used (Single-Use Only)" 
+                                : "Activate School & Send Magic Link"}
+                            </>
+                          ) : (
+                            <>
+                              <Sparkles className="w-4 h-4 text-emerald-300" />
+                              {activating 
+                                ? "Activating School in Database..." 
+                                : licenseValidation.checked && licenseValidation.used 
+                                ? "License Already Used (Single-Use Only)" 
+                                : "Activate School & Complete Setup"}
+                            </>
+                          )}
+                        </button>
+                      </form>
+                    </>
+                  )}
                 </div>
               )}
 

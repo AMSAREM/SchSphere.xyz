@@ -1,0 +1,20 @@
+{
+  "active": true,
+  "licenseKey": "ESEPA-PREM-ENT-SZCM03",
+  "schoolName": "PREMPEH COLLEGE",
+  "school_id": "828f50f3-ebd6-4059-8a86-472ade9299fb",
+  "tier": "Enterprise",
+  "expiryDate": 1818546480639,
+  "activeModules": [
+    "students",
+    "academic",
+    "timetable",
+    "attendance",
+    "results",
+    "reports",
+    "fees",
+    "siren",
+    "evoting",
+    "inventory"
+  ]
+}

@@ -379,3 +379,245 @@ export const licenseApi = {
 
 export const licensesApi = licenseApi;
 
+// ==========================================
+// 9. USERS & AUTHENTICATION API
+// ==========================================
+export const usersApi = {
+  getAll: async (schoolId?: string) => {
+    const targetSchoolId = schoolId || (await getCurrentSchoolId());
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (!error && Array.isArray(data) && data.length > 0) {
+        // Filter by school if school_id is present
+        const filtered = targetSchoolId 
+          ? data.filter(u => !u.school_id || u.school_id === targetSchoolId || u.role === 'super_admin')
+          : data;
+        return filtered.map(u => ({
+          id: u.id,
+          username: u.username,
+          fullName: u.full_name || u.fullName || u.username,
+          email: u.email,
+          phone: u.phone,
+          role: u.role,
+          status: u.status || 'active',
+          schoolId: u.school_id,
+          school_id: u.school_id,
+          createdAt: u.created_at || Date.now(),
+          lastLogin: u.last_login
+        }));
+      }
+    } catch (e) {
+      console.warn('Notice querying Supabase users:', e);
+    }
+
+    try {
+      const res = await fetch('/api/users');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && Array.isArray(data.users)) {
+          return data.users;
+        }
+      }
+    } catch (e) {}
+
+    // Offline / Local Dexie fallback
+    return await db.users.toArray();
+  },
+
+  create: async (userData: any, schoolId?: string) => {
+    const targetSchoolId = schoolId || (await getCurrentSchoolId());
+    const payload = {
+      username: userData.username.trim().toLowerCase(),
+      password_hash: userData.passwordHash || userData.password_hash || '',
+      full_name: userData.fullName || userData.full_name || userData.username,
+      email: userData.email || null,
+      phone: userData.phone || null,
+      role: userData.role || 'teacher',
+      status: userData.status || 'active',
+      school_id: userData.role === 'super_admin' ? null : targetSchoolId,
+      created_at: userData.createdAt || Date.now(),
+      updated_at: Date.now(),
+      last_login: Date.now()
+    };
+
+    // Save to local Dexie
+    let localId: number | undefined;
+    try {
+      const allDb = await db.users.toArray();
+      const existing = allDb.find(u => u.username?.toLowerCase() === payload.username);
+      const dexieUserPayload = {
+        ...payload,
+        fullName: payload.full_name,
+        passwordHash: payload.password_hash,
+        createdAt: payload.created_at || Date.now()
+      };
+
+      if (existing && existing.id) {
+        await db.users.update(existing.id, dexieUserPayload);
+        localId = existing.id;
+      } else {
+        localId = (await db.users.add(dexieUserPayload as any)) as number;
+      }
+    } catch (e) {}
+
+    // Insert/upsert into Supabase
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .upsert([payload], { onConflict: 'school_id,username' })
+        .select()
+        .single();
+
+      if (!error && data) {
+        return {
+          ...data,
+          id: data.id,
+          fullName: data.full_name,
+          passwordHash: data.password_hash
+        };
+      }
+    } catch (e) {
+      console.warn('Notice saving user to Supabase:', e);
+    }
+
+    // Call server API route
+    try {
+      const res = await fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.user) return data.user;
+      }
+    } catch (e) {}
+
+    return { ...payload, id: localId, fullName: payload.full_name };
+  },
+
+  update: async (id: number | string, updates: any) => {
+    // Update local Dexie
+    if (typeof id === 'number') {
+      await db.users.update(id, updates);
+    }
+
+    // Update Supabase
+    try {
+      const supabaseUpdates: any = { updated_at: Date.now() };
+      if (updates.fullName) supabaseUpdates.full_name = updates.fullName;
+      if (updates.full_name) supabaseUpdates.full_name = updates.full_name;
+      if (updates.role) supabaseUpdates.role = updates.role;
+      if (updates.status) supabaseUpdates.status = updates.status;
+      if (updates.passwordHash) supabaseUpdates.password_hash = updates.passwordHash;
+      if (updates.password_hash) supabaseUpdates.password_hash = updates.password_hash;
+      if (updates.email !== undefined) supabaseUpdates.email = updates.email;
+      if (updates.phone !== undefined) supabaseUpdates.phone = updates.phone;
+      if (updates.lastLogin) supabaseUpdates.last_login = updates.lastLogin;
+
+      await supabase.from('users').update(supabaseUpdates).eq('id', id);
+    } catch (e) {
+      console.warn('Notice updating user on Supabase:', e);
+    }
+
+    // Update server endpoint
+    try {
+      await fetch(`/api/users/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates)
+      });
+    } catch (e) {}
+
+    return true;
+  },
+
+  delete: async (id: number | string) => {
+    if (typeof id === 'number') {
+      await db.users.delete(id);
+    }
+
+    try {
+      await supabase.from('users').delete().eq('id', id);
+    } catch (e) {}
+
+    try {
+      await fetch(`/api/users/${id}`, { method: 'DELETE' });
+    } catch (e) {}
+
+    return true;
+  }
+};
+
+// ==========================================
+// 10. AUTH & RECOVERY API
+// ==========================================
+export const authApi = {
+  forgotPassword: async (emailOrUsername: string) => {
+    const cleanInput = emailOrUsername.trim().toLowerCase();
+
+    // 1. Direct validation against Supabase database
+    try {
+      const { data: dbUser } = await supabase
+        .from('users')
+        .select('id, username, full_name, email, status')
+        .or(`email.ilike.${cleanInput},username.ilike.${cleanInput}`)
+        .maybeSingle();
+
+      if (dbUser) {
+        const status = (dbUser.status || 'active').toLowerCase();
+        if (status === 'suspended' || status === 'inactive') {
+          return {
+            success: false,
+            error: "This account is currently inactive or suspended. Please contact your administrator."
+          };
+        }
+
+        const targetEmail = dbUser.email || `${dbUser.username}@schoolsphere.xyz`;
+        // Trigger Supabase client-side recovery email
+        try {
+          await supabase.auth.resetPasswordForEmail(targetEmail, {
+            redirectTo: `${window.location.origin}/auth/reset-password`
+          });
+        } catch (e) {}
+      }
+    } catch (e) {
+      console.warn("Client Supabase auth lookup notice:", e);
+    }
+
+    // 2. Call authoritative backend API to generate secure reset link and code
+    const res = await fetch('/api/auth/forgot-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: cleanInput, username: cleanInput })
+    });
+
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || "Failed to process forgot password request.");
+    }
+
+    return data;
+  },
+
+  resetPassword: async (params: { token?: string; code?: string; email?: string; username?: string; newPassword: string }) => {
+    const res = await fetch('/api/auth/reset-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params)
+    });
+
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || "Failed to reset password.");
+    }
+
+    return data;
+  }
+};
+
+

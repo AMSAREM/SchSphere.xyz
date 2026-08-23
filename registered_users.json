@@ -1,0 +1,41 @@
+[
+  {
+    "id": 13,
+    "username": "cape_headmaster",
+    "fullName": "Dr. K. Mensah",
+    "email": "head@capecoasthigh.edu.gh",
+    "passwordHash": "$2b$10$A.dl3TrDt8JryKItV/S3Re6Z6fE7yyCMFHsYWzOOkdehBSY4B/.P2",
+    "role": "admin",
+    "status": "active",
+    "schoolId": "b95ddf75-bb54-42f1-8005-ff8ed52c7b2f",
+    "school_id": "b95ddf75-bb54-42f1-8005-ff8ed52c7b2f",
+    "createdAt": 1787442428729,
+    "updatedAt": 1787442428729
+  },
+  {
+    "id": 14,
+    "username": "mfantsipim_admin",
+    "fullName": "Kofi Annan Mensah",
+    "email": "admin@mfantsipim.edu.gh",
+    "passwordHash": "$2b$10$4XPdFFBkYvSAEohOTd5DI.B19pl/5lFvebaWT4QCVpmWyDJfk7t76",
+    "role": "admin",
+    "status": "active",
+    "schoolId": "149eab9a-7b8f-46ac-bbb8-f10d72fcb683",
+    "school_id": "149eab9a-7b8f-46ac-bbb8-f10d72fcb683",
+    "createdAt": 1787442473662,
+    "updatedAt": 1787442473662
+  },
+  {
+    "id": 15,
+    "username": "prempeh_head",
+    "fullName": "Master Osei Tutu",
+    "email": "head@prempehcollege.edu.gh",
+    "passwordHash": "$2b$10$DWE5pzjfqN.DmMxYuiXNGee8xSxgZ.epJ9TzhbJ0Xj0YagJzM7ToG",
+    "role": "admin",
+    "status": "active",
+    "schoolId": "828f50f3-ebd6-4059-8a86-472ade9299fb",
+    "school_id": "828f50f3-ebd6-4059-8a86-472ade9299fb",
+    "createdAt": 1787442481256,
+    "updatedAt": 1787442481256
+  }
+]

@@ -62,6 +62,8 @@ import SchoolManagement from './components/SchoolManagement';
 import TenantSwitcher from './components/TenantSwitcher';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { AuthScreens } from './components/auth/AuthScreens';
+import { SecurityProfileModal } from './components/auth/SecurityProfileModal';
+import { PermissionGuard } from './components/auth/PermissionGuard';
 import GetStarted from './components/GetStarted';
 import { NotificationProvider, useNotifications } from './contexts/NotificationContext';
 
@@ -89,6 +91,8 @@ function AppContent() {
   const [activeView, setActiveView] = useState<View>(() => {
     return (localStorage.getItem('esepa_active_view') as View) || 'dashboard';
   });
+
+  const [isSecurityModalOpen, setIsSecurityModalOpen] = useState(false);
 
   const [showGetStarted, setShowGetStarted] = useState<boolean>(() => {
     return !localStorage.getItem('esepa_user');
@@ -1349,16 +1353,25 @@ function AppContent() {
               <div className="h-8 w-[1px] bg-slate-200 hidden sm:block" />
               
               <div className="flex items-center gap-2 sm:gap-3">
-                <div className="text-right hidden sm:block">
-                  <p className="text-sm font-bold text-slate-800 leading-none">{user.fullName}</p>
-                  <p className="text-[10px] text-slate-500 font-medium uppercase tracking-tight mt-1">{user.role}</p>
-                </div>
+                <button
+                  onClick={() => setIsSecurityModalOpen(true)}
+                  className="flex items-center gap-2.5 p-1.5 sm:px-3 sm:py-1.5 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-left group"
+                  title="View Profile, Permissions & Change Password"
+                >
+                  <div className="w-8 h-8 rounded-full bg-linear-to-br from-indigo-500 to-purple-600 text-white flex items-center justify-center font-bold text-xs shadow-xs group-hover:ring-2 group-hover:ring-indigo-400 transition-all">
+                    {user.fullName ? user.fullName[0].toUpperCase() : user.username[0].toUpperCase()}
+                  </div>
+                  <div className="text-left hidden sm:block">
+                    <p className="text-xs font-bold text-slate-800 dark:text-slate-200 leading-tight group-hover:text-indigo-600 transition-colors">{user.fullName || user.username}</p>
+                    <p className="text-[10px] text-slate-500 dark:text-slate-400 font-semibold uppercase tracking-tight mt-0.5">{user.role?.replace('_', ' ')}</p>
+                  </div>
+                </button>
                 <button 
                   onClick={handleLogout}
-                  className="w-9 h-9 sm:w-10 sm:h-10 bg-rose-50 hover:bg-rose-100 rounded-full flex items-center justify-center border border-rose-100 shrink-0 transition-colors group"
+                  className="w-8 h-8 sm:w-9 sm:h-9 bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/30 dark:hover:bg-rose-900/50 rounded-xl flex items-center justify-center border border-rose-100 dark:border-rose-900/50 shrink-0 transition-colors group"
                   title="Log Out"
                 >
-                  <LogOut className="w-4 h-4 sm:w-5 sm:h-5 text-rose-600 group-hover:scale-110 transition-transform" />
+                  <LogOut className="w-4 h-4 text-rose-600 dark:text-rose-400 group-hover:scale-110 transition-transform" />
                 </button>
               </div>
             </div>
@@ -1392,7 +1405,11 @@ function AppContent() {
               {activeView === 'reports' && <ReportTerminal />}
               {activeView === 'fees' && <FeeManagement />}
               {activeView === 'siren' && <SirenTerminal />}
-              {activeView === 'users' && <UserManagement />}
+              {activeView === 'users' && (
+                <PermissionGuard permission="users:create" onNavigateHome={() => setActiveView('dashboard')}>
+                  <UserManagement />
+                </PermissionGuard>
+              )}
               {activeView === 'settings' && <Settings />}
               {activeView === 'evoting' && <EVoting />}
               {activeView === 'inventory' && <InventoryManagement />}
@@ -1441,6 +1458,12 @@ function AppContent() {
           </AnimatePresence>
         </div>
       </main>
+
+      {/* Security & Role Privileges Modal */}
+      <SecurityProfileModal 
+        isOpen={isSecurityModalOpen} 
+        onClose={() => setIsSecurityModalOpen(false)} 
+      />
     </div>
   );
 }

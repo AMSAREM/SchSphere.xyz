@@ -138,11 +138,23 @@ export interface User {
   id?: number;
   schoolId?: string;
   school_id?: string;
+  schoolName?: string;
+  school_name?: string;
+  auth_user_id?: string;
   username: string;
-  passwordHash: string;
+  passwordHash?: string;
+  password_hash?: string;
   fullName: string;
-  role: 'super_admin' | 'admin' | 'headteacher' | 'teacher' | 'accountant' | 'student' | 'parent';
+  full_name?: string;
+  email?: string;
+  phone?: string;
+  role: 'super_admin' | 'creator' | 'admin' | 'headteacher' | 'teacher' | 'accountant' | 'student' | 'parent';
+  status?: 'active' | 'inactive' | 'suspended' | string;
   createdAt: number;
+  created_at?: number;
+  updated_at?: number;
+  lastLogin?: number;
+  last_login?: number;
 }
 
 export interface ExamAnalysisRecord {

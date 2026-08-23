@@ -13,10 +13,22 @@ export const supabaseAnonKey =
   (typeof process !== 'undefined' ? process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY : '') ||
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5pYXZtb255ZndxbHJ5cHBna3N5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU2OTg3MDIsImV4cCI6MjEwMTI3NDcwMn0.JtZL7wwDN48z6_8K5uK-RYK3CKNQx8a6N4Rfh50hX_U';
 
-export const supabase = createClient(
-  supabaseUrl,
-  supabaseAnonKey
-);
+declare global {
+  // eslint-disable-next-line no-var
+  var __supabaseInstance: any;
+}
+
+export const supabase: any =
+  globalThis.__supabaseInstance ||
+  (globalThis.__supabaseInstance = createClient(supabaseUrl, supabaseAnonKey, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: true,
+    }
+  }));
+
+
 
 /**
  * Get active school ID for multi-tenant query filtering
