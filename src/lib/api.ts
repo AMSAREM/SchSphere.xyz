@@ -13,49 +13,63 @@ export const studentsApi = {
   getAll: async (schoolId?: string) => {
     const targetSchoolId = schoolId || (await getCurrentSchoolId());
     try {
-      const { data, error } = await supabase
-        .from('students')
-        .select('*')
-        .eq('school_id', targetSchoolId)
-        .order('createdAt', { ascending: false });
+      if (targetSchoolId) {
+        const { data, error } = await supabase
+          .from('students')
+          .select('*')
+          .or(`school_id.eq.${targetSchoolId},"schoolId".eq.${targetSchoolId}`)
+          .order('createdAt', { ascending: false });
 
-      if (!error && data && data.length > 0) {
-        return data;
+        if (!error && data && data.length > 0) {
+          return data;
+        }
       }
     } catch (e) {
       console.warn('Notice querying Supabase students:', e);
     }
+    
+    // Server API Fallback
+    try {
+      const res = await fetch(`/api/students?school_id=${encodeURIComponent(targetSchoolId || '')}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0) return data;
+      }
+    } catch (e) {}
+
     // Offline / Local Dexie DB Fallback
-    return await db.students.toArray();
+    const local = await db.students.toArray();
+    return targetSchoolId ? local.filter((s: any) => !s.schoolId || s.schoolId === targetSchoolId || s.school_id === targetSchoolId) : local;
   },
 
   getById: async (id: number | string, schoolId?: string) => {
     const targetSchoolId = schoolId || (await getCurrentSchoolId());
-    const { data, error } = await supabase
-      .from('students')
-      .select('*')
-      .eq('school_id', targetSchoolId)
-      .eq('id', id)
-      .maybeSingle();
+    try {
+      const { data, error } = await supabase
+        .from('students')
+        .select('*')
+        .eq('id', id)
+        .maybeSingle();
 
-    if (error || !data) {
-      return await db.students.get(Number(id));
-    }
-    return data;
+      if (!error && data) return data;
+    } catch (e) {}
+
+    return await db.students.get(Number(id));
   },
 
   getByClass: async (className: string, schoolId?: string) => {
     const targetSchoolId = schoolId || (await getCurrentSchoolId());
-    const { data, error } = await supabase
-      .from('students')
-      .select('*')
-      .eq('school_id', targetSchoolId)
-      .eq('class', className);
+    try {
+      let query = supabase.from('students').select('*').eq('class', className);
+      if (targetSchoolId) {
+        query = query.or(`school_id.eq.${targetSchoolId},"schoolId".eq.${targetSchoolId}`);
+      }
+      const { data, error } = await query;
+      if (!error && data && data.length > 0) return data;
+    } catch (e) {}
 
-    if (error || !data || data.length === 0) {
-      return await db.students.where('class').equals(className).toArray();
-    }
-    return data;
+    const local = await db.students.where('class').equals(className).toArray();
+    return targetSchoolId ? local.filter((s: any) => !s.schoolId || s.schoolId === targetSchoolId || s.school_id === targetSchoolId) : local;
   },
 
   create: async (student: any, schoolId?: string) => {
@@ -63,6 +77,7 @@ export const studentsApi = {
     const payload = {
       ...student,
       school_id: targetSchoolId,
+      schoolId: targetSchoolId,
       createdAt: student.createdAt || Date.now()
     };
 
@@ -83,7 +98,40 @@ export const studentsApi = {
     } catch (e) {
       console.warn('Notice syncing created student to Supabase:', e);
     }
+
+    // Call server endpoint fallback
+    try {
+      const res = await fetch('/api/students', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.data) return json.data;
+      }
+    } catch (e) {}
+
     return { ...payload, id: localId };
+  },
+
+  bulkCreate: async (studentsList: any[], schoolId?: string) => {
+    const targetSchoolId = schoolId || (await getCurrentSchoolId());
+    const prepared = studentsList.map(s => ({
+      ...s,
+      school_id: targetSchoolId,
+      schoolId: targetSchoolId,
+      createdAt: s.createdAt || Date.now()
+    }));
+
+    await db.students.bulkAdd(prepared);
+
+    try {
+      await supabase.from('students').insert(prepared.map(s => ({ ...s, id: undefined })));
+    } catch (e) {
+      console.warn('Notice bulk syncing students to Supabase:', e);
+    }
+    return true;
   },
 
   update: async (id: number | string, updates: any, schoolId?: string) => {
@@ -99,7 +147,6 @@ export const studentsApi = {
       const { data, error } = await supabase
         .from('students')
         .update(updates)
-        .eq('school_id', targetSchoolId)
         .eq('id', id)
         .select()
         .maybeSingle();
@@ -108,6 +155,16 @@ export const studentsApi = {
     } catch (e) {
       console.warn('Notice updating student in Supabase:', e);
     }
+
+    // Server fallback
+    try {
+      await fetch(`/api/students/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates)
+      });
+    } catch (e) {}
+
     return updates;
   },
 
@@ -120,9 +177,13 @@ export const studentsApi = {
       await supabase
         .from('students')
         .delete()
-        .eq('school_id', targetSchoolId)
         .eq('id', id);
     } catch (e) {}
+
+    try {
+      await fetch(`/api/students/${id}`, { method: 'DELETE' });
+    } catch (e) {}
+
     return true;
   }
 };
@@ -134,53 +195,309 @@ export const classesApi = {
   getAll: async (schoolId?: string) => {
     const targetSchoolId = schoolId || (await getCurrentSchoolId());
     try {
-      const { data, error } = await supabase
-        .from('classes')
-        .select('*')
-        .eq('school_id', targetSchoolId);
+      if (targetSchoolId) {
+        const { data, error } = await supabase
+          .from('classes')
+          .select('*')
+          .or(`school_id.eq.${targetSchoolId},"schoolId".eq.${targetSchoolId}`);
 
-      if (!error && data && data.length > 0) return data;
+        if (!error && data && data.length > 0) return data;
+      }
     } catch (e) {}
-    return await db.classes.toArray();
+
+    try {
+      const res = await fetch(`/api/classes?school_id=${encodeURIComponent(targetSchoolId || '')}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0) return data;
+      }
+    } catch (e) {}
+
+    const local = await db.classes.toArray();
+    return targetSchoolId ? local.filter((c: any) => !c.schoolId || c.schoolId === targetSchoolId || c.school_id === targetSchoolId) : local;
   },
 
   create: async (classData: { name: string; level: string }, schoolId?: string) => {
     const targetSchoolId = schoolId || (await getCurrentSchoolId());
-    const payload = { ...classData, school_id: targetSchoolId };
-    await db.classes.add(payload);
+    const payload = { ...classData, school_id: targetSchoolId, schoolId: targetSchoolId };
+    const localId = await db.classes.add(payload as any);
     try {
-      await supabase.from('classes').insert([payload]);
+      const { data } = await supabase.from('classes').insert([payload]).select().single();
+      if (data) return data;
     } catch (e) {}
-    return payload;
+
+    try {
+      const res = await fetch('/api/classes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.data) return json.data;
+      }
+    } catch (e) {}
+
+    return { ...payload, id: localId };
+  },
+
+  update: async (id: number | string, updates: Partial<{ name: string; level: string }>, schoolId?: string) => {
+    if (typeof id === 'number') {
+      await db.classes.update(id, updates);
+    }
+    try {
+      await supabase.from('classes').update(updates).eq('id', id);
+    } catch (e) {}
+    try {
+      await fetch(`/api/classes/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates)
+      });
+    } catch (e) {}
+    return true;
+  },
+
+  delete: async (id: number | string, schoolId?: string) => {
+    if (typeof id === 'number') {
+      await db.classes.delete(id);
+    }
+    try {
+      await supabase.from('classes').delete().eq('id', id);
+    } catch (e) {}
+    try {
+      await fetch(`/api/classes/${id}`, { method: 'DELETE' });
+    } catch (e) {}
+    return true;
   }
 };
 
 // ==========================================
-// 3. TEACHERS & STAFF API
+// 3. SUBJECTS API
+// ==========================================
+export const subjectsApi = {
+  getAll: async (schoolId?: string) => {
+    const targetSchoolId = schoolId || (await getCurrentSchoolId());
+    try {
+      if (targetSchoolId) {
+        const { data, error } = await supabase
+          .from('subjects')
+          .select('*')
+          .or(`school_id.eq.${targetSchoolId},"schoolId".eq.${targetSchoolId}`);
+
+        if (!error && data && data.length > 0) {
+          return data.map((sub: any) => ({
+            ...sub,
+            applicableClasses: typeof sub.applicableClasses === 'string' ? JSON.parse(sub.applicableClasses || '[]') : (sub.applicableClasses || [])
+          }));
+        }
+      }
+    } catch (e) {}
+
+    try {
+      const res = await fetch(`/api/subjects?school_id=${encodeURIComponent(targetSchoolId || '')}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0) return data;
+      }
+    } catch (e) {}
+
+    const local = await db.subjects.toArray();
+    return targetSchoolId ? local.filter((s: any) => !s.schoolId || s.schoolId === targetSchoolId || s.school_id === targetSchoolId) : local;
+  },
+
+  create: async (subjectData: { name: string; code: string; applicableClasses?: string[] }, schoolId?: string) => {
+    const targetSchoolId = schoolId || (await getCurrentSchoolId());
+    const payload = {
+      ...subjectData,
+      applicableClasses: subjectData.applicableClasses || [],
+      school_id: targetSchoolId,
+      schoolId: targetSchoolId
+    };
+    const localId = await db.subjects.add(payload as any);
+    try {
+      const { data } = await supabase.from('subjects').insert([payload]).select().single();
+      if (data) return data;
+    } catch (e) {}
+
+    try {
+      const res = await fetch('/api/subjects', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.data) return json.data;
+      }
+    } catch (e) {}
+
+    return { ...payload, id: localId };
+  },
+
+  update: async (id: number | string, updates: any, schoolId?: string) => {
+    if (typeof id === 'number') {
+      await db.subjects.update(id, updates);
+    }
+    try {
+      await supabase.from('subjects').update(updates).eq('id', id);
+    } catch (e) {}
+    try {
+      await fetch(`/api/subjects/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates)
+      });
+    } catch (e) {}
+    return true;
+  },
+
+  delete: async (id: number | string, schoolId?: string) => {
+    if (typeof id === 'number') {
+      await db.subjects.delete(id);
+    }
+    try {
+      await supabase.from('subjects').delete().eq('id', id);
+    } catch (e) {}
+    try {
+      await fetch(`/api/subjects/${id}`, { method: 'DELETE' });
+    } catch (e) {}
+    return true;
+  }
+};
+
+// ==========================================
+// 4. TEACHERS & STAFF API
 // ==========================================
 export const teachersApi = {
   getAll: async (schoolId?: string) => {
     const targetSchoolId = schoolId || (await getCurrentSchoolId());
     try {
-      const { data, error } = await supabase
-        .from('teachers')
-        .select('*')
-        .eq('school_id', targetSchoolId);
+      if (targetSchoolId) {
+        const { data, error } = await supabase
+          .from('teachers')
+          .select('*')
+          .or(`school_id.eq.${targetSchoolId},"schoolId".eq.${targetSchoolId}`);
 
-      if (!error && data && data.length > 0) return data;
+        if (!error && data && data.length > 0) {
+          return data.map((t: any) => ({
+            ...t,
+            assignedClasses: typeof t.assignedClasses === 'string' ? JSON.parse(t.assignedClasses || '[]') : (t.assignedClasses || []),
+            subjects: typeof t.subjects === 'string' ? JSON.parse(t.subjects || '[]') : (t.subjects || [])
+          }));
+        }
+      }
     } catch (e) {}
-    return await db.teachers.toArray();
+
+    try {
+      const res = await fetch(`/api/teachers?school_id=${encodeURIComponent(targetSchoolId || '')}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0) return data;
+      }
+    } catch (e) {}
+
+    const local = await db.teachers.toArray();
+    return targetSchoolId ? local.filter((t: any) => !t.schoolId || t.schoolId === targetSchoolId || t.school_id === targetSchoolId) : local;
   },
 
   create: async (teacher: any, schoolId?: string) => {
     const targetSchoolId = schoolId || (await getCurrentSchoolId());
-    const payload = { ...teacher, school_id: targetSchoolId };
-    await db.teachers.add(payload);
+    const payload = {
+      ...teacher,
+      assignedClasses: teacher.assignedClasses || [],
+      subjects: teacher.subjects || [],
+      school_id: targetSchoolId,
+      schoolId: targetSchoolId
+    };
+    const localId = await db.teachers.add(payload as any);
     try {
-      await supabase.from('teachers').insert([payload]);
+      const { data } = await supabase.from('teachers').insert([payload]).select().single();
+      if (data) return data;
     } catch (e) {}
-    return payload;
+
+    try {
+      const res = await fetch('/api/teachers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.data) return json.data;
+      }
+    } catch (e) {}
+
+    return { ...payload, id: localId };
+  },
+
+  update: async (id: number | string, updates: any, schoolId?: string) => {
+    if (typeof id === 'number') {
+      await db.teachers.update(id, updates);
+    }
+    try {
+      await supabase.from('teachers').update(updates).eq('id', id);
+    } catch (e) {}
+    try {
+      await fetch(`/api/teachers/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates)
+      });
+    } catch (e) {}
+    return true;
+  },
+
+  delete: async (id: number | string, schoolId?: string) => {
+    if (typeof id === 'number') {
+      await db.teachers.delete(id);
+    }
+    try {
+      await supabase.from('teachers').delete().eq('id', id);
+    } catch (e) {}
+    try {
+      await fetch(`/api/teachers/${id}`, { method: 'DELETE' });
+    } catch (e) {}
+    return true;
   }
+};
+
+// ==========================================
+// 5. TENANT ACADEMIC DATA SYNCHRONIZATION
+// ==========================================
+export const syncTenantAcademicData = async (targetSchoolId: string) => {
+  if (!targetSchoolId) return false;
+  try {
+    const res = await fetch(`/api/academic/sync-tenant/${encodeURIComponent(targetSchoolId)}`);
+    if (res.ok) {
+      const { data } = await res.json();
+      if (data) {
+        // Hydrate local Dexie with tenant's records
+        if (Array.isArray(data.students) && data.students.length > 0) {
+          await db.students.bulkPut(data.students);
+        }
+        if (Array.isArray(data.teachers) && data.teachers.length > 0) {
+          await db.teachers.bulkPut(data.teachers);
+        }
+        if (Array.isArray(data.classes) && data.classes.length > 0) {
+          await db.classes.bulkPut(data.classes);
+        }
+        if (Array.isArray(data.subjects) && data.subjects.length > 0) {
+          await db.subjects.bulkPut(data.subjects);
+        }
+        if (Array.isArray(data.attendance) && data.attendance.length > 0) {
+          await db.attendance.bulkPut(data.attendance);
+        }
+        if (Array.isArray(data.results) && data.results.length > 0) {
+          await db.results.bulkPut(data.results);
+        }
+        return true;
+      }
+    }
+  } catch (e) {
+    console.warn('Notice hydrating tenant academic data:', e);
+  }
+  return false;
 };
 
 // ==========================================

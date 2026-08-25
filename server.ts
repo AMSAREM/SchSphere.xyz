@@ -468,6 +468,50 @@ async function createPostgresTables() {
     }
   }
 
+  // Ensure school_id multi-tenant column exists on all academic tables & drop restrictive single-tenant unique constraints
+  const tenantColumnMigrations = [
+    'ALTER TABLE students ADD COLUMN IF NOT EXISTS school_id VARCHAR(255);',
+    'ALTER TABLE students ADD COLUMN IF NOT EXISTS "schoolId" VARCHAR(255);',
+    'ALTER TABLE teachers ADD COLUMN IF NOT EXISTS school_id VARCHAR(255);',
+    'ALTER TABLE teachers ADD COLUMN IF NOT EXISTS "schoolId" VARCHAR(255);',
+    'ALTER TABLE classes ADD COLUMN IF NOT EXISTS school_id VARCHAR(255);',
+    'ALTER TABLE classes ADD COLUMN IF NOT EXISTS "schoolId" VARCHAR(255);',
+    'ALTER TABLE subjects ADD COLUMN IF NOT EXISTS school_id VARCHAR(255);',
+    'ALTER TABLE subjects ADD COLUMN IF NOT EXISTS "schoolId" VARCHAR(255);',
+    'ALTER TABLE attendance ADD COLUMN IF NOT EXISTS school_id VARCHAR(255);',
+    'ALTER TABLE attendance ADD COLUMN IF NOT EXISTS "schoolId" VARCHAR(255);',
+    'ALTER TABLE results ADD COLUMN IF NOT EXISTS school_id VARCHAR(255);',
+    'ALTER TABLE results ADD COLUMN IF NOT EXISTS "schoolId" VARCHAR(255);',
+    'ALTER TABLE "termReports" ADD COLUMN IF NOT EXISTS school_id VARCHAR(255);',
+    'ALTER TABLE "termReports" ADD COLUMN IF NOT EXISTS "schoolId" VARCHAR(255);',
+    'ALTER TABLE settings ADD COLUMN IF NOT EXISTS school_id VARCHAR(255);',
+    'ALTER TABLE settings ADD COLUMN IF NOT EXISTS "schoolId" VARCHAR(255);',
+    'ALTER TABLE users ADD COLUMN IF NOT EXISTS school_id VARCHAR(255);',
+    'ALTER TABLE users ADD COLUMN IF NOT EXISTS "schoolId" VARCHAR(255);',
+    'ALTER TABLE "examAnalysis" ADD COLUMN IF NOT EXISTS school_id VARCHAR(255);',
+    'ALTER TABLE "promotionHistory" ADD COLUMN IF NOT EXISTS school_id VARCHAR(255);',
+    'ALTER TABLE inventory ADD COLUMN IF NOT EXISTS school_id VARCHAR(255);',
+    'ALTER TABLE expenses ADD COLUMN IF NOT EXISTS school_id VARCHAR(255);',
+    'ALTER TABLE polls ADD COLUMN IF NOT EXISTS school_id VARCHAR(255);',
+    'ALTER TABLE candidates ADD COLUMN IF NOT EXISTS school_id VARCHAR(255);',
+    'ALTER TABLE votes ADD COLUMN IF NOT EXISTS school_id VARCHAR(255);',
+    // Drop single-tenant unique constraints so multiple schools can have classes with same names (e.g. "Primary 1") or subjects ("Mathematics")
+    'ALTER TABLE classes DROP CONSTRAINT IF EXISTS classes_name_key;',
+    'ALTER TABLE subjects DROP CONSTRAINT IF EXISTS subjects_name_key;',
+    'ALTER TABLE subjects DROP CONSTRAINT IF EXISTS subjects_code_key;',
+    'ALTER TABLE students DROP CONSTRAINT IF EXISTS students_studentId_key;',
+    'ALTER TABLE teachers DROP CONSTRAINT IF EXISTS teachers_staffId_key;',
+    'ALTER TABLE teachers DROP CONSTRAINT IF EXISTS teachers_email_key;'
+  ];
+
+  for (const alterQ of tenantColumnMigrations) {
+    try {
+      await pgPool.query(alterQ);
+    } catch (e: any) {
+      // Ignore if constraint doesn't exist or column already present
+    }
+  }
+
   // Enable Row Level Security (RLS) & Policies on all Supabase tables
   const rlsTables = [
     'users', 'classes', 'subjects', 'students', 'teachers', 'attendance', 'results',
@@ -801,9 +845,9 @@ function invalidateSmsBalanceCache() {
   smsBalanceCacheStore = null;
 }
 
-// Sync Pull helpers with in-memory caching
-async function pullData(forceFresh = false) {
-  if (!forceFresh && dbCacheStore && (Date.now() - dbCacheStore.timestamp < DB_CACHE_TTL_MS)) {
+// Sync Pull helpers with in-memory caching and tenant scoping
+async function pullData(forceFresh = false, targetSchoolId?: string | null) {
+  if (!forceFresh && dbCacheStore && !targetSchoolId && (Date.now() - dbCacheStore.timestamp < DB_CACHE_TTL_MS)) {
     return dbCacheStore.data;
   }
 
@@ -817,14 +861,27 @@ async function pullData(forceFresh = false) {
         "examAnalysis", "smsLogs", "polls", "candidates", "votes",
         "promotionHistory", "inventory", "expenses", "licenses", "schools"
       ];
+      
+      const tenantScopedTables = new Set([
+        "students", "attendance", "results", "subjects",
+        "classes", "teachers", "termReports", "settings",
+        "examAnalysis", "promotionHistory", "inventory", "expenses"
+      ]);
+
       const data: any = {};
       for (const table of tables) {
-        const { data: rows, error } = await adminClient.from(table).select('*');
+        let query = adminClient.from(table).select('*');
+        if (targetSchoolId && tenantScopedTables.has(table)) {
+          // Pull records belonging to this tenant or shared global defaults
+          query = query.or(`school_id.eq.${targetSchoolId},"schoolId".eq.${targetSchoolId},school_id.is.null`);
+        }
+
+        const { data: rows, error } = await query;
         if (error) {
           console.warn(`Supabase pull warning on table ${table}:`, error.message);
           data[table] = [];
         } else {
-          data[table] = (rows || []).map(row => {
+          data[table] = (rows || []).map((row: any) => {
             const item = { ...row };
             if (typeof item.feeBreakdown === 'string') {
               try { item.feeBreakdown = JSON.parse(item.feeBreakdown); } catch (e) {}
@@ -913,13 +970,15 @@ async function pullData(forceFresh = false) {
     }
   }
 
-  // Save to cache
-  dbCacheStore = { data: resultData, timestamp: Date.now() };
+  // Save to cache only when fetching all tenants globally
+  if (!targetSchoolId) {
+    dbCacheStore = { data: resultData, timestamp: Date.now() };
+  }
   return resultData;
 }
 
-// Sync Push helpers
-async function pushData(data: any) {
+// Sync Push helpers with tenant scoping
+async function pushData(data: any, targetSchoolId?: string | null) {
   if (dbMode === "supabase") {
     try {
       const adminClient = getSupabaseAdmin();
@@ -930,23 +989,47 @@ async function pushData(data: any) {
         "promotionHistory", "inventory", "expenses", "licenses", "schools"
       ];
 
+      const tenantScopedTables = new Set([
+        "students", "attendance", "results", "subjects",
+        "classes", "teachers", "termReports", "settings",
+        "examAnalysis", "promotionHistory", "inventory", "expenses"
+      ]);
+
       for (const table of tableKeys) {
         const records = data[table] || [];
 
-        if (pgPool) {
-          try {
-            await pgPool.query(`DELETE FROM "${table}"`);
-          } catch (e) {
+        // Scoped cleanup: if targetSchoolId is provided, ONLY delete rows for this tenant
+        if (targetSchoolId && tenantScopedTables.has(table)) {
+          if (pgPool) {
+            try {
+              await pgPool.query(`DELETE FROM "${table}" WHERE school_id = $1 OR "schoolId" = $1`, [targetSchoolId]);
+            } catch (e) {
+              await adminClient.from(table).delete().or(`school_id.eq.${targetSchoolId},"schoolId".eq.${targetSchoolId}`);
+            }
+          } else {
+            await adminClient.from(table).delete().or(`school_id.eq.${targetSchoolId},"schoolId".eq.${targetSchoolId}`);
+          }
+        } else if (!targetSchoolId) {
+          // Global reset only if no schoolId was specified
+          if (pgPool) {
+            try {
+              await pgPool.query(`DELETE FROM "${table}"`);
+            } catch (e) {
+              await adminClient.from(table).delete().neq('id', -99999999);
+            }
+          } else {
             await adminClient.from(table).delete().neq('id', -99999999);
           }
-        } else {
-          await adminClient.from(table).delete().neq('id', -99999999);
         }
 
         if (records.length === 0) continue;
 
         const formattedRecords = records.map((r: any) => {
           const item = { ...r };
+          if (targetSchoolId && tenantScopedTables.has(table)) {
+            item.school_id = item.school_id || targetSchoolId;
+            item.schoolId = item.schoolId || targetSchoolId;
+          }
           if (item.feesPaid !== undefined) item.feesPaid = Number(item.feesPaid) || 0;
           if (item.totalFees !== undefined) item.totalFees = Number(item.totalFees) || 0;
           if (item.amount !== undefined) item.amount = Number(item.amount) || 0;
@@ -6043,14 +6126,15 @@ async function startServer() {
     }
   });
 
-  // Pull All Data from DB (MySQL or Fallback JSON file)
+  // Pull All Data from DB (Supabase/MySQL or Fallback JSON file) with multi-tenant support
   app.get("/api/db/sync", async (req, res) => {
     try {
       const isFresh = req.query.fresh === 'true';
-      const data = await pullData(isFresh);
+      const schoolId = (req.query.school_id || req.query.schoolId || req.headers['x-school-id'] || '') as string;
+      const data = await pullData(isFresh, schoolId || null);
       res.setHeader("Cache-Control", "private, max-age=15, stale-while-revalidate=30");
       addSyncLog("Pull Local Storage", true, data);
-      res.json({ success: true, data, cached: !isFresh && !!dbCacheStore });
+      res.json({ success: true, data, cached: !isFresh && !schoolId && !!dbCacheStore });
     } catch (err: any) {
       console.error("Sync pull failed:", err);
       addSyncLog("Pull Local Storage", false, null, err.message);
@@ -6058,17 +6142,338 @@ async function startServer() {
     }
   });
 
-  // Push All Data to DB (MySQL or Fallback JSON file)
+  // Push All Data to DB (Supabase/MySQL or Fallback JSON file) with multi-tenant support
   app.post("/api/db/sync", async (req, res) => {
     try {
       invalidateDbCache();
-      await pushData(req.body);
+      const schoolId = (req.query.school_id || req.query.schoolId || req.headers['x-school-id'] || req.body?.school_id || req.body?.schoolId || '') as string;
+      await pushData(req.body, schoolId || null);
       addSyncLog("Push Local Storage", true, req.body);
       res.json({ success: true, message: "Sync successful!" });
     } catch (err: any) {
       console.error("Sync push failed:", err);
       addSyncLog("Push Local Storage", false, req.body, err.message);
       res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  // ==========================================
+  // MULTI-TENANT ACADEMIC API ENDPOINTS
+  // ==========================================
+
+  // Sync entire academic dataset for a specific school tenant
+  app.get("/api/academic/sync-tenant/:schoolId", async (req, res) => {
+    try {
+      const { schoolId } = req.params;
+      const adminClient = getSupabaseAdmin();
+      const tables = ["students", "teachers", "classes", "subjects", "attendance", "results", "termReports"];
+      const result: Record<string, any[]> = {};
+
+      for (const table of tables) {
+        const { data, error } = await adminClient
+          .from(table)
+          .select('*')
+          .or(`school_id.eq.${schoolId},"schoolId".eq.${schoolId},school_id.is.null`);
+
+        if (error) {
+          console.warn(`Error pulling tenant data for ${table}:`, error.message);
+          result[table] = [];
+        } else {
+          result[table] = (data || []).map((row: any) => {
+            const item = { ...row };
+            if (typeof item.feeBreakdown === 'string') {
+              try { item.feeBreakdown = JSON.parse(item.feeBreakdown); } catch (e) {}
+            }
+            if (typeof item.feePaidBreakdown === 'string') {
+              try { item.feePaidBreakdown = JSON.parse(item.feePaidBreakdown); } catch (e) {}
+            }
+            if (typeof item.applicableClasses === 'string') {
+              try { item.applicableClasses = JSON.parse(item.applicableClasses); } catch (e) {}
+            }
+            if (typeof item.assignedClasses === 'string') {
+              try { item.assignedClasses = JSON.parse(item.assignedClasses); } catch (e) {}
+            }
+            if (typeof item.subjects === 'string') {
+              try { item.subjects = JSON.parse(item.subjects); } catch (e) {}
+            }
+            return item;
+          });
+        }
+      }
+
+      return res.json({ success: true, schoolId, data: result });
+    } catch (err: any) {
+      console.error("Error in /api/academic/sync-tenant:", err);
+      return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  // Bulk push academic dataset for a specific school tenant
+  app.post("/api/academic/sync-tenant/:schoolId", async (req, res) => {
+    try {
+      const { schoolId } = req.params;
+      const payload = req.body || {};
+      await pushData(payload, schoolId);
+      return res.json({ success: true, message: `Academic data successfully synced for school ${schoolId}` });
+    } catch (err: any) {
+      console.error("Error in post /api/academic/sync-tenant:", err);
+      return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  // Students CRUD
+  app.get("/api/students", async (req, res) => {
+    try {
+      const adminClient = getSupabaseAdmin();
+      const schoolId = (req.query.school_id || req.query.schoolId || req.headers['x-school-id'] || '') as string;
+      let query = adminClient.from('students').select('*');
+      if (schoolId) {
+        query = query.or(`school_id.eq.${schoolId},"schoolId".eq.${schoolId}`);
+      }
+      const { data, error } = await query.order('id', { ascending: false });
+      if (error) throw error;
+      const parsed = (data || []).map((s: any) => ({
+        ...s,
+        feeBreakdown: typeof s.feeBreakdown === 'string' ? JSON.parse(s.feeBreakdown || '{}') : s.feeBreakdown,
+        feePaidBreakdown: typeof s.feePaidBreakdown === 'string' ? JSON.parse(s.feePaidBreakdown || '{}') : s.feePaidBreakdown,
+        feesPaid: Number(s.feesPaid) || 0,
+        totalFees: Number(s.totalFees) || 0
+      }));
+      return res.json(parsed);
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  app.post("/api/students", async (req, res) => {
+    try {
+      const adminClient = getSupabaseAdmin();
+      const schoolId = (req.query.school_id || req.query.schoolId || req.headers['x-school-id'] || req.body?.schoolId || req.body?.school_id || '') as string;
+      const payload = { ...req.body };
+      if (schoolId) {
+        payload.school_id = schoolId;
+        payload.schoolId = schoolId;
+      }
+      const { data, error } = await adminClient.from('students').insert([payload]).select().single();
+      if (error) throw error;
+      return res.json({ success: true, data });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  app.put("/api/students/:id", async (req, res) => {
+    try {
+      const adminClient = getSupabaseAdmin();
+      const { id } = req.params;
+      const payload = { ...req.body };
+      delete payload.id;
+      const { data, error } = await adminClient.from('students').update(payload).eq('id', id).select().single();
+      if (error) throw error;
+      return res.json({ success: true, data });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  app.delete("/api/students/:id", async (req, res) => {
+    try {
+      const adminClient = getSupabaseAdmin();
+      const { id } = req.params;
+      const { error } = await adminClient.from('students').delete().eq('id', id);
+      if (error) throw error;
+      return res.json({ success: true, message: "Student removed successfully" });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  // Teachers CRUD
+  app.get("/api/teachers", async (req, res) => {
+    try {
+      const adminClient = getSupabaseAdmin();
+      const schoolId = (req.query.school_id || req.query.schoolId || req.headers['x-school-id'] || '') as string;
+      let query = adminClient.from('teachers').select('*');
+      if (schoolId) {
+        query = query.or(`school_id.eq.${schoolId},"schoolId".eq.${schoolId}`);
+      }
+      const { data, error } = await query.order('id', { ascending: false });
+      if (error) throw error;
+      const parsed = (data || []).map((t: any) => ({
+        ...t,
+        assignedClasses: typeof t.assignedClasses === 'string' ? JSON.parse(t.assignedClasses || '[]') : (t.assignedClasses || []),
+        subjects: typeof t.subjects === 'string' ? JSON.parse(t.subjects || '[]') : (t.subjects || [])
+      }));
+      return res.json(parsed);
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  app.post("/api/teachers", async (req, res) => {
+    try {
+      const adminClient = getSupabaseAdmin();
+      const schoolId = (req.query.school_id || req.query.schoolId || req.headers['x-school-id'] || req.body?.schoolId || req.body?.school_id || '') as string;
+      const payload = { ...req.body };
+      if (schoolId) {
+        payload.school_id = schoolId;
+        payload.schoolId = schoolId;
+      }
+      const { data, error } = await adminClient.from('teachers').insert([payload]).select().single();
+      if (error) throw error;
+      return res.json({ success: true, data });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  app.put("/api/teachers/:id", async (req, res) => {
+    try {
+      const adminClient = getSupabaseAdmin();
+      const { id } = req.params;
+      const payload = { ...req.body };
+      delete payload.id;
+      const { data, error } = await adminClient.from('teachers').update(payload).eq('id', id).select().single();
+      if (error) throw error;
+      return res.json({ success: true, data });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  app.delete("/api/teachers/:id", async (req, res) => {
+    try {
+      const adminClient = getSupabaseAdmin();
+      const { id } = req.params;
+      const { error } = await adminClient.from('teachers').delete().eq('id', id);
+      if (error) throw error;
+      return res.json({ success: true, message: "Teacher deleted successfully" });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  // Classes CRUD
+  app.get("/api/classes", async (req, res) => {
+    try {
+      const adminClient = getSupabaseAdmin();
+      const schoolId = (req.query.school_id || req.query.schoolId || req.headers['x-school-id'] || '') as string;
+      let query = adminClient.from('classes').select('*');
+      if (schoolId) {
+        query = query.or(`school_id.eq.${schoolId},"schoolId".eq.${schoolId}`);
+      }
+      const { data, error } = await query.order('id', { ascending: true });
+      if (error) throw error;
+      return res.json(data || []);
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  app.post("/api/classes", async (req, res) => {
+    try {
+      const adminClient = getSupabaseAdmin();
+      const schoolId = (req.query.school_id || req.query.schoolId || req.headers['x-school-id'] || req.body?.schoolId || req.body?.school_id || '') as string;
+      const payload = { ...req.body };
+      if (schoolId) {
+        payload.school_id = schoolId;
+        payload.schoolId = schoolId;
+      }
+      const { data, error } = await adminClient.from('classes').insert([payload]).select().single();
+      if (error) throw error;
+      return res.json({ success: true, data });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  app.put("/api/classes/:id", async (req, res) => {
+    try {
+      const adminClient = getSupabaseAdmin();
+      const { id } = req.params;
+      const payload = { ...req.body };
+      delete payload.id;
+      const { data, error } = await adminClient.from('classes').update(payload).eq('id', id).select().single();
+      if (error) throw error;
+      return res.json({ success: true, data });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  app.delete("/api/classes/:id", async (req, res) => {
+    try {
+      const adminClient = getSupabaseAdmin();
+      const { id } = req.params;
+      const { error } = await adminClient.from('classes').delete().eq('id', id);
+      if (error) throw error;
+      return res.json({ success: true, message: "Class deleted successfully" });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  // Subjects CRUD
+  app.get("/api/subjects", async (req, res) => {
+    try {
+      const adminClient = getSupabaseAdmin();
+      const schoolId = (req.query.school_id || req.query.schoolId || req.headers['x-school-id'] || '') as string;
+      let query = adminClient.from('subjects').select('*');
+      if (schoolId) {
+        query = query.or(`school_id.eq.${schoolId},"schoolId".eq.${schoolId}`);
+      }
+      const { data, error } = await query.order('id', { ascending: true });
+      if (error) throw error;
+      const parsed = (data || []).map((sub: any) => ({
+        ...sub,
+        applicableClasses: typeof sub.applicableClasses === 'string' ? JSON.parse(sub.applicableClasses || '[]') : (sub.applicableClasses || [])
+      }));
+      return res.json(parsed);
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  app.post("/api/subjects", async (req, res) => {
+    try {
+      const adminClient = getSupabaseAdmin();
+      const schoolId = (req.query.school_id || req.query.schoolId || req.headers['x-school-id'] || req.body?.schoolId || req.body?.school_id || '') as string;
+      const payload = { ...req.body };
+      if (schoolId) {
+        payload.school_id = schoolId;
+        payload.schoolId = schoolId;
+      }
+      const { data, error } = await adminClient.from('subjects').insert([payload]).select().single();
+      if (error) throw error;
+      return res.json({ success: true, data });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  app.put("/api/subjects/:id", async (req, res) => {
+    try {
+      const adminClient = getSupabaseAdmin();
+      const { id } = req.params;
+      const payload = { ...req.body };
+      delete payload.id;
+      const { data, error } = await adminClient.from('subjects').update(payload).eq('id', id).select().single();
+      if (error) throw error;
+      return res.json({ success: true, data });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  app.delete("/api/subjects/:id", async (req, res) => {
+    try {
+      const adminClient = getSupabaseAdmin();
+      const { id } = req.params;
+      const { error } = await adminClient.from('subjects').delete().eq('id', id);
+      if (error) throw error;
+      return res.json({ success: true, message: "Subject deleted successfully" });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
     }
   });
 

@@ -5,6 +5,7 @@ import { db, type Teacher, type Subject, type ClassInfo } from '../db/schema';
 import { Plus, Trash2, Book, GraduationCap, Users, Edit2, Search, Printer } from 'lucide-react';
 import { motion } from 'motion/react';
 import { cn, triggerPrint } from '../lib/utils';
+import { teachersApi, classesApi, subjectsApi } from '../lib/api';
 
 export default function AcademicManagement() {
   const [activeTab, setActiveTab] = useState<'teachers' | 'classes' | 'subjects'>('teachers');
@@ -127,14 +128,14 @@ function TeacherList() {
       subjects: selectedSubjects
     };
 
-    if (editingTeacher) {
-      await db.teachers.update(editingTeacher.id!, teacherData);
+    if (editingTeacher && editingTeacher.id) {
+      await teachersApi.update(editingTeacher.id, teacherData);
     } else {
       const teacher: Teacher = {
         ...teacherData,
         staffId: `TEA-${Date.now().toString().slice(-4)}`,
       };
-      await db.teachers.add(teacher);
+      await teachersApi.create(teacher);
     }
 
     setIsModalOpen(false);
@@ -185,7 +186,7 @@ function TeacherList() {
                     <Edit2 className="w-4 h-4" />
                   </button>
                   <button 
-                    onClick={() => db.teachers.delete(teacher.id!)}
+                    onClick={() => teachersApi.delete(teacher.id!)}
                     className="p-1.5 text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition-all"
                   >
                     <Trash2 className="w-4 h-4" />
@@ -326,10 +327,10 @@ function ClassList() {
       level: formData.get('level') as string
     };
 
-    if (editingClass) {
-      await db.classes.update(editingClass.id!, clsData);
+    if (editingClass && editingClass.id) {
+      await classesApi.update(editingClass.id, clsData);
     } else {
-      await db.classes.add(clsData);
+      await classesApi.create(clsData);
     }
     
     setIsModalOpen(false);
@@ -379,7 +380,7 @@ function ClassList() {
                 <Edit2 className="w-3.5 h-3.5" />
               </button>
               <button 
-                onClick={() => db.classes.delete(cls.id!)}
+                onClick={() => classesApi.delete(cls.id!)}
                 className="p-1.5 text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-lg"
               >
                 <Trash2 className="w-3.5 h-3.5" />
@@ -454,10 +455,10 @@ function SubjectList() {
       applicableClasses: isAllClasses ? ['All'] : selectedClasses
     };
 
-    if (editingSubject) {
-      await db.subjects.update(editingSubject.id!, subData);
+    if (editingSubject && editingSubject.id) {
+      await subjectsApi.update(editingSubject.id, subData);
     } else {
-      await db.subjects.add(subData);
+      await subjectsApi.create(subData);
     }
 
     setIsModalOpen(false);
@@ -513,7 +514,7 @@ function SubjectList() {
                   <Edit2 className="w-4 h-4" />
                 </button>
                 <button 
-                  onClick={() => db.subjects.delete(sub.id!)}
+                  onClick={() => subjectsApi.delete(sub.id!)}
                   className="p-1.5 text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition-all"
                 >
                   <Trash2 className="w-4 h-4" />
