@@ -93,7 +93,7 @@ export async function syncPendingLicenses(): Promise<{
       }
     }
   } catch (err) {
-    console.error('Failed syncing pending licenses:', err);
+    console.warn('Notice syncing pending licenses (will retry when online):', err);
   }
 
   return { success: false, syncedCount: 0, failedCount: pending.length, licenses };

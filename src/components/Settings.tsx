@@ -136,7 +136,7 @@ export default function Settings() {
     setLoadingLicenseAction(false);
   };
 
-  const fetchGeneratedLicenses = async () => {
+  const fetchGeneratedLicenses = async (retries = 2) => {
     try {
       const res = await fetch('/api/license/list');
       if (res.ok) {
@@ -151,7 +151,11 @@ export default function Settings() {
         }
       }
     } catch (err) {
-      console.error("Failed to load generated licenses:", err);
+      if (retries > 0) {
+        setTimeout(() => fetchGeneratedLicenses(retries - 1), 1000);
+        return;
+      }
+      console.warn("Notice loading generated licenses (using cached offline copy):", err);
     }
     const cached = localStorage.getItem('esepa_generated_licenses');
     if (cached) {

@@ -352,101 +352,103 @@ export default function CoreSuite({
       <div className="space-y-6">
         {/* Statistics Grid */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="bg-white border border-slate-200 p-5 rounded-2xl shadow-xs">
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Active School Portals</span>
-            <div className="text-2xl font-black text-slate-800 mt-1 flex items-baseline gap-2">
+          <div className="bg-white border border-slate-200/80 p-5 rounded-2xl shadow-xs transition hover:border-slate-300">
+            <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Active School Portals</span>
+            <div className="text-2xl font-black text-slate-900 mt-2 flex items-baseline gap-2">
               <span>{activeSchoolsCount}</span>
-              <span className="text-xs text-emerald-500 font-bold">● Live</span>
+              <span className="text-xs text-emerald-600 font-bold bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">● Live</span>
             </div>
           </div>
-          <div className="bg-white border border-slate-200 p-5 rounded-2xl shadow-xs">
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Cumulative Sync Records</span>
-            <div className="text-2xl font-black text-slate-800 mt-1">
+          <div className="bg-white border border-slate-200/80 p-5 rounded-2xl shadow-xs transition hover:border-slate-300">
+            <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Cumulative Sync Records</span>
+            <div className="text-2xl font-black text-slate-900 mt-2">
               {totalDemoRecords.toLocaleString()}
             </div>
           </div>
-          <div className="bg-white border border-slate-200 p-5 rounded-2xl shadow-xs">
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">System CPU Load</span>
-            <div className="text-2xl font-black text-slate-800 mt-1 flex items-baseline gap-1.5">
+          <div className="bg-white border border-slate-200/80 p-5 rounded-2xl shadow-xs transition hover:border-slate-300">
+            <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">System CPU Load</span>
+            <div className="text-2xl font-black text-slate-900 mt-2 flex items-baseline gap-2">
               <span>1.24%</span>
-              <span className="text-xs text-indigo-500 font-bold">Optimal</span>
+              <span className="text-xs text-indigo-600 font-bold bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-200">Optimal</span>
             </div>
           </div>
-          <div className="bg-white border border-slate-200 p-5 rounded-2xl shadow-xs">
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Licensing Pipe</span>
-            <div className="text-2xl font-black text-indigo-600 mt-1 text-sm font-mono truncate select-all">
+          <div className="bg-white border border-slate-200/80 p-5 rounded-2xl shadow-xs transition hover:border-slate-300">
+            <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Licensing Pipe</span>
+            <div className="text-lg font-bold text-indigo-600 mt-2 font-mono truncate select-all">
               {licenseInfo?.licenseKey || 'EVALUATION'}
             </div>
           </div>
         </div>
 
         {/* Charts & Graphs Panel */}
-        <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-xs space-y-6">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-100">
-            <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 bg-indigo-50 text-indigo-600 rounded-xl flex items-center justify-center">
+        <div className="bg-white border border-slate-200/80 rounded-3xl p-6 sm:p-8 shadow-xs space-y-8">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-slate-100">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-indigo-50 text-indigo-600 rounded-xl flex items-center justify-center">
                 <Activity className="w-5 h-5" />
               </div>
               <div>
-                <h2 className="text-sm font-bold text-slate-800">Platform Sync & Active Logins Real-Time Dashboard</h2>
-                <p className="text-[11px] text-slate-500">
+                <h2 className="text-base font-bold text-slate-900">Platform Sync & Active Logins Real-Time Dashboard</h2>
+                <p className="text-xs text-slate-500 mt-0.5">
                   Monitoring cloud synchronization pipelines, active license login rates, and record densities.
                 </p>
               </div>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div className="lg:col-span-2 space-y-3">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1">
-                <TrendingUp className="w-3.5 h-3.5 text-indigo-500" />
-                Growth Trend (6-Month Cumulative Projection)
-              </span>
-              <div className="h-[260px] w-full">
+          <div className="grid grid-cols-1 xl:grid-cols-12 gap-8">
+            <div className="xl:col-span-7 space-y-4">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                  <TrendingUp className="w-4 h-4 text-indigo-600" />
+                  Growth Trend (6-Month Cumulative Projection)
+                </span>
+              </div>
+              <div className="h-[280px] w-full bg-slate-50/40 p-3 rounded-2xl border border-slate-100">
                 <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={monthlyTrendData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <AreaChart data={monthlyTrendData} margin={{ top: 10, right: 15, left: -15, bottom: 0 }}>
                     <defs>
                       <linearGradient id="colorRecords" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="var(--color-indigo-500)" stopOpacity={0.2}/>
+                        <stop offset="5%" stopColor="var(--color-indigo-500)" stopOpacity={0.25}/>
                         <stop offset="95%" stopColor="var(--color-indigo-500)" stopOpacity={0}/>
                       </linearGradient>
                       <linearGradient id="colorLogins" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#10b981" stopOpacity={0.2}/>
+                        <stop offset="5%" stopColor="#10b981" stopOpacity={0.25}/>
                         <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
                       </linearGradient>
                     </defs>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                    <XAxis dataKey="name" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
-                    <YAxis yAxisId="left" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
-                    <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
-                    <Tooltip contentStyle={{ borderRadius: '12px', fontSize: '11px' }} />
-                    <Legend verticalAlign="top" height={36} iconSize={10} iconType="circle" wrapperStyle={{ fontSize: '11px', fontWeight: 600 }} />
-                    <Area yAxisId="left" type="monotone" dataKey="records" name="Total Synced Records" stroke="var(--color-indigo-500)" strokeWidth={2} fillOpacity={1} fill="url(#colorRecords)" />
-                    <Area yAxisId="right" type="monotone" dataKey="logins" name="Active School Logins" stroke="#10b981" strokeWidth={2} fillOpacity={1} fill="url(#colorLogins)" />
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                    <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} />
+                    <YAxis yAxisId="left" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} />
+                    <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} />
+                    <Tooltip contentStyle={{ borderRadius: '12px', fontSize: '12px', border: '1px solid #e2e8f0', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.05)' }} />
+                    <Legend verticalAlign="top" height={36} iconSize={10} iconType="circle" wrapperStyle={{ fontSize: '12px', fontWeight: 600 }} />
+                    <Area yAxisId="left" type="monotone" dataKey="records" name="Total Synced Records" stroke="var(--color-indigo-500)" strokeWidth={2.5} fillOpacity={1} fill="url(#colorRecords)" />
+                    <Area yAxisId="right" type="monotone" dataKey="logins" name="Active School Logins" stroke="#10b981" strokeWidth={2.5} fillOpacity={1} fill="url(#colorLogins)" />
                   </AreaChart>
                 </ResponsiveContainer>
               </div>
             </div>
 
-            <div className="lg:col-span-1 space-y-3 bg-slate-50/50 p-4 rounded-2xl border border-slate-100 flex flex-col justify-between">
+            <div className="xl:col-span-5 space-y-4 bg-slate-50/60 p-5 rounded-2xl border border-slate-200/70 flex flex-col justify-between">
               <div>
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1 mb-2">
-                  <BarChart3 className="w-3.5 h-3.5 text-indigo-500" />
-                  Live Sync Composition (By Category)
+                <span className="text-xs font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5 mb-1.5">
+                  <BarChart3 className="w-4 h-4 text-indigo-600" />
+                  Live Sync Composition
                 </span>
-                <p className="text-[10px] text-slate-500 leading-relaxed">
-                  Reflecting real-time reactive counts stored in the client-side persistent storage container.
+                <p className="text-xs text-slate-500 leading-relaxed">
+                  Real-time reactive counts stored in the client-side persistent storage container.
                 </p>
               </div>
 
-              <div className="h-[180px] w-full my-2">
+              <div className="h-[230px] w-full my-2">
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={compositionData} layout="vertical" margin={{ top: 0, right: 10, left: -20, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f1f5f9" />
-                    <XAxis type="number" tick={{ fontSize: 9, fill: '#64748b' }} axisLine={false} tickLine={false} />
-                    <YAxis dataKey="name" type="category" tick={{ fontSize: 9, fill: '#64748b', fontWeight: 600 }} axisLine={false} tickLine={false} width={80} />
-                    <Tooltip contentStyle={{ borderRadius: '10px', fontSize: '10px' }} />
-                    <Bar dataKey="value" name="Records Count" radius={[0, 4, 4, 0]}>
+                  <BarChart data={compositionData} layout="vertical" margin={{ top: 0, right: 15, left: -10, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e2e8f0" />
+                    <XAxis type="number" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
+                    <YAxis dataKey="name" type="category" tick={{ fontSize: 11, fill: '#475569', fontWeight: 600 }} axisLine={false} tickLine={false} width={85} />
+                    <Tooltip contentStyle={{ borderRadius: '12px', fontSize: '11px', border: '1px solid #e2e8f0' }} />
+                    <Bar dataKey="value" name="Records Count" radius={[0, 6, 6, 0]}>
                       {compositionData.map((entry, index) => (
                         <Cell key={`cell-${index}`} fill={entry.color} />
                       ))}

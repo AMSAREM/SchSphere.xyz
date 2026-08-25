@@ -620,4 +620,104 @@ export const authApi = {
   }
 };
 
+// ==========================================
+// 11. LICENSE CODES & APP-DRIVEN EMAIL API
+// ==========================================
+export const licenseCodesApi = {
+  sendLicense: async (payload: {
+    to?: string;
+    email?: string;
+    userId?: string;
+    schoolName?: string;
+    recipientName?: string;
+    tier?: string;
+  }) => {
+    const res = await fetch('/api/send-license', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok || (!data.ok && !data.success)) {
+      throw new Error(data.error || 'Failed to generate and send license code');
+    }
+    return data;
+  },
+
+  signup: async (payload: {
+    email: string;
+    password?: string;
+    fullName?: string;
+    schoolName?: string;
+    tier?: string;
+    role?: string;
+  }) => {
+    const res = await fetch('/api/signup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok || (!data.ok && !data.success)) {
+      throw new Error(data.error || 'Failed to complete signup');
+    }
+    return data;
+  },
+
+  verifyCode: async (payload: {
+    license_code: string;
+    email?: string;
+    userId?: string;
+  }) => {
+    const res = await fetch('/api/license/verify-code', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok || (!data.ok && !data.success)) {
+      throw new Error(data.error || 'Invalid or unverified license code');
+    }
+    return data;
+  },
+
+  resendCode: async (payload: {
+    email: string;
+    userId?: string;
+    schoolName?: string;
+    fullName?: string;
+  }) => {
+    const res = await fetch('/api/license/resend-code', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok || (!data.ok && !data.success)) {
+      throw new Error(data.error || 'Failed to resend license code');
+    }
+    return data;
+  },
+
+  testSmtp: async (payload?: {
+    to?: string;
+    customHost?: string;
+    customPort?: number;
+    customUser?: string;
+    customPass?: string;
+    customFrom?: string;
+  }) => {
+    const res = await fetch('/api/email/test-smtp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload || {})
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to send test email');
+    }
+    return data;
+  }
+};
+
 

@@ -35,6 +35,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
+import { getGoogleAccessToken } from '../lib/gmailService';
 
 // Import our modular sub-suites
 import CoreSuite from './creator/CoreSuite';
@@ -123,6 +124,9 @@ export default function CreatorHub({ onLicenseChange, onExit }: CreatorHubProps)
 
   // Generator input states
   const [genSchoolName, setGenSchoolName] = useState('');
+  const [genClientEmail, setGenClientEmail] = useState('');
+  const [genContactPerson, setGenContactPerson] = useState('');
+  const [sendEmailOnGenerate, setSendEmailOnGenerate] = useState(true);
   const [genDuration, setGenDuration] = useState('12');
   const [genTier, setGenTier] = useState('Standard');
   const [genSelectedModules, setGenSelectedModules] = useState<string[]>(AVAILABLE_MODULES.map(m => m.id));
@@ -208,13 +212,13 @@ export default function CreatorHub({ onLicenseChange, onExit }: CreatorHubProps)
         setSyncLogs(data);
       }
     } catch (err) {
-      console.error('Failed to load sync logs:', err);
+      console.warn('Notice loading sync logs (will retry):', err);
     } finally {
       setLoadingSyncLogs(false);
     }
   };
 
-  const fetchGeneratedLicenses = async () => {
+  const fetchGeneratedLicenses = async (retries = 2) => {
     try {
       const res = await fetch('/api/license/list');
       if (res.ok) {
@@ -229,7 +233,11 @@ export default function CreatorHub({ onLicenseChange, onExit }: CreatorHubProps)
         }
       }
     } catch (err) {
-      console.error('Failed to load generated licenses:', err);
+      if (retries > 0) {
+        setTimeout(() => fetchGeneratedLicenses(retries - 1), 1000);
+        return;
+      }
+      console.warn('Notice loading generated licenses (using cached offline copy):', err);
     }
     const cached = localStorage.getItem('esepa_generated_licenses');
     if (cached) {
@@ -309,15 +317,28 @@ export default function CreatorHub({ onLicenseChange, onExit }: CreatorHubProps)
     }
     setIsGenerating(true);
     let createdLicense: any = null;
+    let emailNotice: string | null = null;
+    let emailDispatched = false;
+    const googleToken = getGoogleAccessToken();
+
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (googleToken) {
+        headers['Authorization'] = `Bearer ${googleToken}`;
+      }
+
       const res = await fetch('/api/license/generate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           schoolName: genSchoolName,
           durationMonths: genDuration,
           tier: genTier,
-          activeModules: genSelectedModules
+          activeModules: genSelectedModules,
+          clientEmail: genClientEmail,
+          contactPerson: genContactPerson,
+          sendEmail: sendEmailOnGenerate,
+          googleAccessToken: googleToken || undefined
         })
       });
 
@@ -329,6 +350,8 @@ export default function CreatorHub({ onLicenseChange, onExit }: CreatorHubProps)
 
       if (res.ok && data.success && data.license) {
         createdLicense = data.license;
+        emailNotice = data.emailNotice || data.message;
+        emailDispatched = !!data.emailDispatched;
       } else if (data.error) {
         showToast(data.error, 'error');
         setIsGenerating(false);
@@ -357,6 +380,8 @@ export default function CreatorHub({ onLicenseChange, onExit }: CreatorHubProps)
         expiryDate: exp,
         createdAt: Date.now(),
         status: "active",
+        clientEmail: genClientEmail.trim() || null,
+        contactPerson: genContactPerson.trim() || null,
         activeModules: genSelectedModules || ['students', 'academic', 'timetable', 'attendance', 'results', 'reports', 'fees']
       };
     }
@@ -365,11 +390,61 @@ export default function CreatorHub({ onLicenseChange, onExit }: CreatorHubProps)
     const updated = [createdLicense, ...existing.filter((l: any) => l.key !== createdLicense.key)];
     localStorage.setItem('esepa_generated_licenses', JSON.stringify(updated));
 
-    showToast(`Issued License Code: ${createdLicense.key}`, 'success');
+    if (emailDispatched && genClientEmail.trim()) {
+      showToast(`License issued & dispatched to ${genClientEmail.trim()} successfully! Key: ${createdLicense.key}`, 'success');
+    } else {
+      showToast(`Issued License Code: ${createdLicense.key}`, 'success');
+    }
+
     setGenSchoolName('');
+    setGenClientEmail('');
+    setGenContactPerson('');
     setLicensesList(updated);
     setIsGenerating(false);
     fetchGeneratedLicenses();
+  };
+
+  const handleSendLicenseEmail = async (
+    licenseKey: string, 
+    recipientEmail: string, 
+    schoolName?: string, 
+    contactPerson?: string
+  ): Promise<boolean> => {
+    if (!licenseKey || !recipientEmail) {
+      showToast('License key and recipient email address are required.', 'error');
+      return false;
+    }
+    const googleToken = getGoogleAccessToken();
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (googleToken) {
+        headers['Authorization'] = `Bearer ${googleToken}`;
+      }
+
+      const res = await fetch('/api/license/send-email', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          licenseKey,
+          recipientEmail,
+          schoolName,
+          contactPerson,
+          googleAccessToken: googleToken || undefined
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showToast(data.message || `License ${licenseKey} dispatched to ${recipientEmail}!`, 'success');
+        fetchGeneratedLicenses();
+        return true;
+      } else {
+        showToast(data.error || 'Failed to send license email', 'error');
+        return false;
+      }
+    } catch (err: any) {
+      showToast('Network error sending license email', 'error');
+      return false;
+    }
   };
 
   const handleSaveInstanceModules = async () => {
@@ -847,6 +922,13 @@ Elena / Akoko Solutions (Vendor System Creator)`;
                   copiedProposal={copiedProposal}
                   copyProposalToClipboard={copyProposalToClipboard}
                   pricing={pricing}
+                  genClientEmail={genClientEmail}
+                  setGenClientEmail={setGenClientEmail}
+                  genContactPerson={genContactPerson}
+                  setGenContactPerson={setGenContactPerson}
+                  sendEmailOnGenerate={sendEmailOnGenerate}
+                  setSendEmailOnGenerate={setSendEmailOnGenerate}
+                  handleSendLicenseEmail={handleSendLicenseEmail}
                 />
               )}
 

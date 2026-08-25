@@ -265,6 +265,7 @@ export default function GetStarted({
     let activatedSchool: any = null;
 
     try {
+      const targetEmail = setupAdminEmail.trim() || setupSchoolEmail.trim();
       const res = await fetch('/api/license/activate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -275,10 +276,12 @@ export default function GetStarted({
           adminFullName: setupAdminName.trim() || 'Head Administrator',
           schoolName: setupSchoolName.trim(),
           schoolPhone: setupSchoolPhone.trim(),
-          schoolEmail: setupSchoolEmail.trim() || setupAdminEmail.trim(),
+          schoolEmail: targetEmail,
+          adminEmail: targetEmail,
           schoolAddress: setupSchoolAddress.trim(),
           academicYear: setupAcademicYear.trim() || '2026/2027',
-          currentTerm: setupCurrentTerm.trim() || 'Term 1'
+          currentTerm: setupCurrentTerm.trim() || 'Term 1',
+          redirectUrl: window.location.origin
         })
       });
       const data = await res.json().catch(() => null);
@@ -358,12 +361,22 @@ export default function GetStarted({
       const loginSuccess = await login(username, password);
 
       if (loginSuccess) {
-        showToast("License successfully activated & authenticated via Supabase database! School is now active.", "success");
+        showToast(
+          setupAdminEmail.trim() || setupSchoolEmail.trim()
+            ? "License activated & magic link dispatched to your email! Logging into portal..."
+            : "License successfully activated & authenticated via Supabase database! School is now active.",
+          "success"
+        );
         setActivating(false);
         onActivationSuccess();
         return;
       } else {
-        showToast("License activated in database! Please log in with your new admin credentials.", "info");
+        showToast(
+          setupAdminEmail.trim() || setupSchoolEmail.trim()
+            ? "License activated & magic link dispatched to your email! Please log in."
+            : "License activated in database! Please log in with your new admin credentials.",
+          "info"
+        );
         setActivating(false);
         onActivationSuccess();
         return;
@@ -436,6 +449,7 @@ export default function GetStarted({
       const keyToUse = setupLicenseInfo?.licenseKey || setupLicenseInfo?.key || licenseInput.trim().toUpperCase();
       
       // 1. Activate in database
+      const clientEmail = setupAdminEmail.trim() || setupSchoolEmail.trim();
       const res = await fetch('/api/license/activate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -446,10 +460,12 @@ export default function GetStarted({
           adminFullName: setupAdminName.trim() || 'Head Administrator',
           schoolName: setupSchoolName.trim().toUpperCase() || 'SCHOOL SPHERE ACADEMY',
           schoolPhone: setupSchoolPhone.trim() || '+233 24 000 0000',
-          schoolEmail: setupSchoolEmail.trim() || setupAdminEmail.trim(),
+          schoolEmail: clientEmail,
+          adminEmail: clientEmail,
           schoolAddress: setupSchoolAddress.trim(),
           academicYear: setupAcademicYear.trim() || '2026/2027',
-          currentTerm: setupCurrentTerm.trim() || 'Term 1'
+          currentTerm: setupCurrentTerm.trim() || 'Term 1',
+          redirectUrl: window.location.origin
         })
       });
 

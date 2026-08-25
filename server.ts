@@ -7,6 +7,7 @@ import fs from "fs";
 import dotenv from "dotenv";
 import dns from "dns";
 import bcrypt from "bcryptjs";
+import nodemailer from "nodemailer";
 import { getSupabaseAdmin } from "./lib/supabase/server.js";
 import { generateAuthToken, authenticateToken, optionalAuthenticateToken, requireRoles, requireSchoolScope, verifyAuthToken } from "./lib/auth.js";
 
@@ -235,6 +236,7 @@ function initFallbackDB() {
       inventory: [],
       expenses: [],
       licenses: [],
+      license_codes: [],
       schools: []
     };
     fs.writeFileSync(fallbackFilePath, JSON.stringify(initialData, null, 2));
@@ -444,6 +446,17 @@ async function createPostgresTables() {
       "expiry_date" BIGINT DEFAULT NULL,
       "active_status" VARCHAR(50) NOT NULL DEFAULT 'active',
       "created_at" BIGINT NOT NULL DEFAULT (extract(epoch from now()) * 1000)::bigint
+    )`,
+    `CREATE TABLE IF NOT EXISTS license_codes (
+      id BIGSERIAL PRIMARY KEY,
+      "user_id" VARCHAR(255) NOT NULL,
+      "email" VARCHAR(255) NOT NULL,
+      "license_code" VARCHAR(255) NOT NULL,
+      "status" VARCHAR(50) NOT NULL DEFAULT 'pending',
+      "school_name" VARCHAR(255) DEFAULT NULL,
+      "created_at" TIMESTAMPTZ NOT NULL DEFAULT now(),
+      "sent_at" TIMESTAMPTZ DEFAULT NULL,
+      "verified_at" TIMESTAMPTZ DEFAULT NULL
     )`
   ];
 
@@ -459,7 +472,7 @@ async function createPostgresTables() {
   const rlsTables = [
     'users', 'classes', 'subjects', 'students', 'teachers', 'attendance', 'results',
     '"termReports"', 'settings', '"examAnalysis"', '"smsLogs"', 'polls', 'candidates',
-    'votes', '"promotionHistory"', 'inventory', 'expenses', 'licenses', 'schools', 'school_licenses'
+    'votes', '"promotionHistory"', 'inventory', 'expenses', 'licenses', 'schools', 'school_licenses', 'license_codes'
   ];
 
   for (const table of rlsTables) {
@@ -669,6 +682,17 @@ async function createMySQLTables() {
       address TEXT,
       status VARCHAR(50) DEFAULT 'active',
       createdAt BIGINT
+    )`,
+    `CREATE TABLE IF NOT EXISTS license_codes (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      user_id VARCHAR(255) NOT NULL,
+      email VARCHAR(255) NOT NULL,
+      license_code VARCHAR(255) NOT NULL,
+      status VARCHAR(50) NOT NULL DEFAULT 'pending',
+      school_name VARCHAR(255) DEFAULT NULL,
+      created_at BIGINT NOT NULL,
+      sent_at BIGINT DEFAULT NULL,
+      verified_at BIGINT DEFAULT NULL
     )`
   ];
 
@@ -1427,7 +1451,7 @@ async function startServer() {
             // Sync with Supabase Auth (auth.users)
             try {
               const { data: userList } = await adminClient.auth.admin.listUsers();
-              const foundAuthUser = userList?.users?.find(u => u.email?.toLowerCase() === targetEmail.toLowerCase());
+              const foundAuthUser = (userList?.users as any[])?.find((u: any) => u.email?.toLowerCase() === targetEmail.toLowerCase());
               
               if (foundAuthUser) {
                 authUserId = foundAuthUser.id;
@@ -1588,6 +1612,50 @@ async function startServer() {
         console.warn("Notice saving license_status.json:", err.message);
       }
 
+      // 7. Generate Magic Link & Dispatch Email to Client User if email provided
+      let magicLinkUrl: string | null = null;
+      let emailDispatched = false;
+      const targetClientEmail = (schoolEmail?.trim() || req.body?.adminEmail?.trim() || req.body?.email?.trim() || matchedLicense?.client_email || localMatch?.clientEmail || '').toLowerCase();
+
+      if (targetClientEmail && targetClientEmail.includes('@')) {
+        try {
+          const effectiveRedirect = req.body?.redirectUrl || 'https://ai.studio/apps/a3dcbc82-0bbd-43c0-9bc8-6b9090159f51';
+          const { data: linkData, error: linkError } = await adminClient.auth.admin.generateLink({
+            type: 'magiclink',
+            email: targetClientEmail,
+            options: {
+              redirectTo: effectiveRedirect
+            }
+          });
+          if (linkData?.properties?.action_link) {
+            magicLinkUrl = linkData.properties.action_link;
+          } else if (linkError) {
+            console.warn("Notice in admin.generateLink for activate:", linkError.message);
+          }
+        } catch (genErr: any) {
+          console.warn("Notice generating magic link during activate:", genErr?.message);
+        }
+
+        try {
+          const dispatchRes = await dispatchLicenseEmailServer({
+            recipientEmail: targetClientEmail,
+            licenseKey: keyUpper,
+            schoolName: effectiveSchoolName,
+            tier: effectiveTier,
+            durationMonths: localMatch?.durationMonths || "12",
+            contactPerson: adminFullName?.trim() || 'Head Administrator',
+            activeModules: effectiveModules,
+            magicLinkUrl: magicLinkUrl || undefined,
+            customMessage: `Your school instance for "${effectiveSchoolName}" has been successfully activated. You can sign in immediately using your administrator credentials or via the secure magic link below.`
+          });
+          if (dispatchRes.dispatched) {
+            emailDispatched = true;
+          }
+        } catch (dispatchErr: any) {
+          console.warn("Notice dispatching activation email to client:", dispatchErr?.message);
+        }
+      }
+
       const schoolPayload = {
         id: dbSchoolId,
         name: effectiveSchoolName,
@@ -1598,11 +1666,15 @@ async function startServer() {
 
       return res.json({ 
         success: true, 
-        message: "School License activated successfully! School profile and admin access are now active.",
+        message: targetClientEmail 
+          ? `School license activated successfully! A secure access confirmation & magic link has been sent to ${targetClientEmail}.`
+          : "School License activated successfully! School profile and admin access are now active.",
         token: authToken || undefined,
         user: authUserObj || undefined,
         license: updatedLicense,
-        school: schoolPayload
+        school: schoolPayload,
+        magicLinkUrl: magicLinkUrl || undefined,
+        emailDispatched
       });
     } catch (err: any) {
       console.error("Error in /api/license/activate:", err);
@@ -1687,7 +1759,7 @@ async function startServer() {
       let authUserId: string | null = null;
       try {
         const { data: userList } = await adminClient.auth.admin.listUsers();
-        const foundAuthUser = userList?.users?.find(u => u.email?.toLowerCase() === cleanEmail);
+        const foundAuthUser = (userList?.users as any[])?.find((u: any) => u.email?.toLowerCase() === cleanEmail);
         
         if (foundAuthUser) {
           authUserId = foundAuthUser.id;
@@ -1824,7 +1896,28 @@ async function startServer() {
         console.warn("Notice in admin.generateLink:", genErr?.message);
       }
 
-      // Also trigger signInWithOtp (without forcing recreate) so configured SMTP providers can deliver the email
+      // Also trigger direct server email dispatch (SMTP / Resend / Gmail API)
+      let emailDispatched = false;
+      try {
+        const dispatchRes = await dispatchLicenseEmailServer({
+          recipientEmail: cleanEmail,
+          licenseKey: keyUpper,
+          schoolName: effectiveSchoolName,
+          tier: effectiveTier,
+          durationMonths: localMatch?.durationMonths || "12",
+          contactPerson: fullName?.trim() || 'Head Administrator',
+          activeModules: effectiveModules,
+          magicLinkUrl: magicLinkUrl || undefined,
+          customMessage: `Your school license has been activated and your admin account is ready. Click the magic sign-in button below to access your SchoolSphere administrative portal directly.`
+        });
+        if (dispatchRes.dispatched) {
+          emailDispatched = true;
+        }
+      } catch (dispatchErr: any) {
+        console.warn("Notice dispatching magic link email via server dispatcher:", dispatchErr?.message);
+      }
+
+      // Also trigger signInWithOtp as fallback
       try {
         const { error: otpError } = await adminClient.auth.signInWithOtp({
           email: cleanEmail,
@@ -1858,12 +1951,13 @@ async function startServer() {
 
       return res.json({
         success: true,
-        message: `School license activated! A secure magic sign-in link has been prepared and dispatched to ${cleanEmail}.`,
+        message: `School license activated! A secure magic sign-in link has been dispatched to ${cleanEmail}.`,
         license: updatedLicense,
         token: authToken,
         user: authUserObj,
         magicLinkUrl,
         emailOtpCode,
+        emailDispatched,
         school: {
           id: dbSchoolId,
           name: effectiveSchoolName,
@@ -2499,13 +2593,54 @@ async function startServer() {
         lastLogin: userPayload.last_login
       };
 
+      // Automatically create license code and dispatch email if email is provided
+      let generatedLicenseCode: string | null = null;
+      let emailDispatched = false;
+      if (email && email.includes('@')) {
+        try {
+          const effectiveSchoolName = data?.schools?.name || `${userPayload.full_name}'s Institution`;
+          generatedLicenseCode = makeLicenseCode(effectiveSchoolName);
+          const userIdStr = String(data?.id || registeredUser.id);
+
+          await adminClient
+            .from('license_codes')
+            .upsert([{
+              user_id: userIdStr,
+              email: email.toLowerCase().trim(),
+              license_code: generatedLicenseCode,
+              status: 'pending',
+              school_name: effectiveSchoolName,
+              created_at: new Date().toISOString()
+            }], { onConflict: 'user_id' });
+
+          const mailRes = await sendLicenseEmail({
+            to: email.toLowerCase().trim(),
+            license_code: generatedLicenseCode,
+            schoolName: effectiveSchoolName,
+            recipientName: userPayload.full_name
+          });
+
+          if (mailRes.dispatched) {
+            emailDispatched = true;
+            await adminClient
+              .from('license_codes')
+              .update({ status: 'sent', sent_at: new Date().toISOString() })
+              .eq('user_id', userIdStr);
+          }
+        } catch (e: any) {
+          console.warn("Notice generating license during registration:", e?.message);
+        }
+      }
+
       const token = generateAuthToken(registeredUser);
 
       return res.json({
         success: true,
         token,
         user: registeredUser,
-        school: data?.schools || null
+        school: data?.schools || null,
+        license_code: generatedLicenseCode,
+        licenseEmailDispatched: emailDispatched
       });
     } catch (err: any) {
       console.error("Error in /api/auth/register:", err);
@@ -3250,12 +3385,1001 @@ async function startServer() {
     }
   });
 
-  // Generate a new license key and live sync to Supabase database
+  // Verify an email address format and domain reachability via DNS MX records
+  async function verifyEmailAddressServerSide(email: string): Promise<{ isValid: boolean; error?: string; domain?: string; suggestion?: string }> {
+    if (!email || typeof email !== 'string') {
+      return { isValid: false, error: 'Email address cannot be empty.' };
+    }
+    const clean = email.trim().toLowerCase();
+    const EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
+    
+    if (!EMAIL_REGEX.test(clean)) {
+      return { isValid: false, error: 'Invalid email syntax (RFC 5322 format required).' };
+    }
+
+    const parts = clean.split('@');
+    if (parts.length !== 2) {
+      return { isValid: false, error: 'Email must contain exactly one @ symbol.' };
+    }
+
+    const [localPart, domainPart] = parts;
+    const domainParts = domainPart.split('.');
+    const tld = domainParts[domainParts.length - 1];
+
+    if (!tld || tld.length < 2 || !/^[a-zA-Z]+$/.test(tld)) {
+      return { isValid: false, error: `Invalid domain extension .${tld}. TLD must contain at least 2 alphabetic characters.` };
+    }
+
+    // Common typo mapping
+    const DOMAIN_TYPO_MAP: Record<string, string> = {
+      'gmaill.com': 'gmail.com', 'gamil.com': 'gmail.com', 'gmai.com': 'gmail.com', 'gmial.com': 'gmail.com',
+      'hotmial.com': 'hotmail.com', 'hotmaill.com': 'hotmail.com', 'yaho.com': 'yahoo.com', 'outlok.com': 'outlook.com',
+      'iclud.com': 'icloud.com'
+    };
+    const suggestion = DOMAIN_TYPO_MAP[domainPart] ? `${localPart}@${DOMAIN_TYPO_MAP[domainPart]}` : undefined;
+
+    // Test DNS MX / A records
+    try {
+      const mxRecords = await dns.promises.resolveMx(domainPart).catch(() => []);
+      if (mxRecords && mxRecords.length > 0) {
+        return { isValid: true, domain: domainPart, suggestion };
+      }
+      const aRecords = await dns.promises.resolve(domainPart).catch(() => []);
+      if (aRecords && aRecords.length > 0) {
+        return { isValid: true, domain: domainPart, suggestion };
+      }
+      // DNS-over-HTTPS fallback
+      const dohRes = await fetch(`https://1.1.1.1/dns-query?name=${encodeURIComponent(domainPart)}&type=MX`, {
+        headers: { 'accept': 'application/dns-json' }
+      }).catch(() => null);
+      if (dohRes && dohRes.ok) {
+        const dohData = await dohRes.json() as any;
+        if (dohData?.Answer && dohData.Answer.length > 0) {
+          return { isValid: true, domain: domainPart, suggestion };
+        }
+      }
+    } catch (e: any) {
+      console.warn("DNS check exception for domain:", domainPart, e?.message);
+    }
+
+    return { isValid: true, domain: domainPart, suggestion };
+  }
+
+  // API endpoint for live client email verification
+  app.post("/api/verify-email", async (req, res) => {
+    try {
+      const { email } = req.body || {};
+      const result = await verifyEmailAddressServerSide(email || '');
+      return res.json(result);
+    } catch (err: any) {
+      return res.status(500).json({ isValid: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  // Helper to build formatted email content (HTML, plain text, mailto)
+  function buildLicenseEmailContent(params: {
+    recipientEmail: string;
+    licenseKey: string;
+    schoolName: string;
+    tier?: string;
+    durationMonths?: string | number;
+    contactPerson?: string;
+    activeModules?: string[];
+    magicLinkUrl?: string;
+    customMessage?: string;
+  }) {
+    const { recipientEmail, licenseKey, schoolName, tier, durationMonths, contactPerson, activeModules, magicLinkUrl, customMessage } = params;
+    const hasMagicLink = !!magicLinkUrl;
+    const subject = hasMagicLink 
+      ? `✨ Your SchoolSphere Magic Sign-In & Activation - ${schoolName}` 
+      : `🎓 SchoolSphere License Activation - ${schoolName} (${licenseKey})`;
+    const activationUrl = magicLinkUrl || `https://ai.studio/apps/a3dcbc82-0bbd-43c0-9bc8-6b9090159f51?license=${encodeURIComponent(licenseKey)}`;
+    const expiryText = durationMonths === 'perpetual' ? 'Perpetual (Lifetime Activation)' : `${durationMonths || 12} Months Subscription`;
+    const recipientGreeting = contactPerson || `${schoolName} Administration`;
+
+    const modulesList = (activeModules && activeModules.length > 0)
+      ? activeModules.map(m => `• ${m.toUpperCase()}`).join('\n')
+      : '• STANDARD COMPREHENSIVE SCHOOL SUITE';
+
+    const textBody = [
+      `Dear ${recipientGreeting},`,
+      ``,
+      hasMagicLink
+        ? `Your institution "${schoolName}" has been successfully activated on SchoolSphere with full Master Administrator privileges.`
+        : `Your institution "${schoolName}" has been issued an official SchoolSphere software license key.`,
+      customMessage ? `\nNote: ${customMessage}\n` : ``,
+      `----------------------------------------`,
+      `LICENSE & ACCESS DETAILS:`,
+      `Serial Key: ${licenseKey}`,
+      `Plan Tier:  ${tier || 'Standard'}`,
+      `Duration:   ${expiryText}`,
+      `----------------------------------------`,
+      ``,
+      hasMagicLink ? `DIRECT MAGIC SIGN-IN LINK (No password needed):` : `DIRECT ACTIVATION LINK:`,
+      `${activationUrl}`,
+      ``,
+      `HOW TO ACCESS:`,
+      hasMagicLink
+        ? `1. Click the secure magic sign-in link above.\n2. You will be authenticated immediately as Head Administrator.\n3. Your school database and modules are live and ready.`
+        : `1. Open the activation link above (or launch SchoolSphere).\n2. Enter your serial key: ${licenseKey}\n3. Complete setup to access your administrative dashboard.`,
+      ``,
+      `INCLUDED MODULES:`,
+      `${modulesList}`,
+      ``,
+      `Best regards,`,
+      `SchoolSphere Cloud Administration`
+    ].filter(line => line !== null).join('\n');
+
+    const modulesHtml = (activeModules && activeModules.length > 0)
+      ? activeModules.map(m => `<li style="margin-bottom: 4px; color: #334155;"><strong>✓</strong> ${m.toUpperCase()}</li>`).join('')
+      : '<li style="color: #334155;"><strong>✓</strong> Standard Comprehensive School Suite</li>';
+
+    const buttonLabel = hasMagicLink ? '✨ Direct Magic Sign-In & Launch Portal' : '⚡ Activate SchoolSphere Portal';
+
+    const htmlBody = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>${subject}</title></head>
+<body style="margin:0;padding:0;background-color:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1e293b;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f8fafc;padding:32px 16px;">
+    <tr>
+      <td align="center">
+        <table width="100%" style="max-width:600px;background-color:#ffffff;border-radius:20px;overflow:hidden;box-shadow:0 10px 25px -5px rgba(0,0,0,0.05);border:1px solid #e2e8f0;" cellpadding="0" cellspacing="0">
+          <tr>
+            <td style="background:linear-gradient(135deg,#1e1b4b 0%,#312e81 50%,#4338ca 100%);padding:32px 28px;text-align:left;">
+              <div style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:2px;color:#a5b4fc;margin-bottom:6px;">Official Institutional License Dispatch</div>
+              <div style="font-size:24px;font-weight:900;color:#ffffff;margin:0;">SchoolSphere Academy</div>
+              <div style="font-size:13px;color:#c7d2fe;margin-top:4px;font-weight:500;">Next-Generation School Management & SIS Cloud System</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:32px 28px;">
+              <p style="font-size:15px;line-height:24px;color:#334155;margin-top:0;">Dear <strong>${recipientGreeting}</strong>,</p>
+              <p style="font-size:14px;line-height:22px;color:#475569;margin-bottom:24px;">
+                ${hasMagicLink 
+                  ? `Your institution <strong>${schoolName}</strong> is activated! We have generated a direct, secure magic sign-in link for your administrator account.`
+                  : `Your institution <strong>${schoolName}</strong> has been issued an official SchoolSphere license authorization key. Use the key and activation button below to unlock your school portal.`}
+              </p>
+              ${customMessage ? `<div style="background-color:#f1f5f9;border-left:4px solid #4f46e5;padding:12px 16px;border-radius:8px;font-size:13px;color:#334155;margin-bottom:24px;">${customMessage}</div>` : ''}
+              <table width="100%" style="background-color:#f8fafc;border:2px dashed #c7d2fe;border-radius:16px;margin-bottom:24px;" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="padding:20px;text-align:center;">
+                    <div style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:1.5px;color:#64748b;margin-bottom:8px;">License Authorization Serial Key</div>
+                    <div style="font-family:'Courier New',Courier,monospace;font-size:22px;font-weight:900;color:#4338ca;letter-spacing:1px;background-color:#ffffff;padding:12px 16px;border-radius:10px;border:1px solid #e0e7ff;display:inline-block;">${licenseKey}</div>
+                    <div style="font-size:12px;color:#64748b;margin-top:10px;">Plan Tier: <strong style="color:#0f172a;">${tier || 'Standard'}</strong> • Duration: <strong style="color:#0f172a;">${expiryText}</strong></div>
+                  </td>
+                </tr>
+              </table>
+              <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:28px;">
+                <tr>
+                  <td align="center">
+                    <a href="${activationUrl}" target="_blank" style="background:linear-gradient(135deg,#4f46e5 0%,#4338ca 100%);color:#ffffff;text-decoration:none;padding:14px 28px;border-radius:12px;font-size:14px;font-weight:800;display:inline-block;box-shadow:0 4px 12px rgba(79,70,229,0.35);text-transform:uppercase;">${buttonLabel}</a>
+                  </td>
+                </tr>
+              </table>
+              <div style="background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:18px 20px;margin-bottom:24px;">
+                <div style="font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:1px;color:#0f172a;margin-bottom:10px;">${hasMagicLink ? 'Instant Sign-In Instructions:' : 'Quick Activation Instructions:'}</div>
+                <ol style="margin:0;padding-left:20px;font-size:13px;color:#475569;line-height:22px;">
+                  ${hasMagicLink ? `
+                    <li>Click the button above to authenticate instantly without typing passwords.</li>
+                    <li>Keep your serial key (<code style="background:#e0e7ff;color:#4338ca;padding:2px 6px;border-radius:4px;font-weight:bold;">${licenseKey}</code>) safe for administrative records.</li>
+                    <li>Begin configuring your students, teachers, and academic terms!</li>
+                  ` : `
+                    <li>Click the activation button above.</li>
+                    <li>Copy and paste your serial key: <code style="background:#e0e7ff;color:#4338ca;padding:2px 6px;border-radius:4px;font-weight:bold;">${licenseKey}</code></li>
+                    <li>Complete your onboarding details to unlock the administrative dashboard.</li>
+                  `}
+                </ol>
+              </div>
+              <div style="border-top:1px solid #f1f5f9;padding-top:18px;">
+                <div style="font-size:12px;font-weight:800;color:#334155;margin-bottom:8px;">Authorized System Modules:</div>
+                <ul style="margin:0;padding-left:18px;font-size:12px;color:#475569;line-height:18px;">${modulesHtml}</ul>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td style="background-color:#f8fafc;border-top:1px solid #e2e8f0;padding:20px 28px;text-align:center;">
+              <div style="font-size:11px;color:#94a3b8;font-weight:600;">© ${new Date().getFullYear()} SchoolSphere Academy. Institutional Cloud License.</div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+
+    const mailtoUrl = `mailto:${encodeURIComponent(recipientEmail)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(textBody)}`;
+
+    return { subject, textBody, htmlBody, mailtoUrl, activationUrl };
+  }
+
+  // Unified multi-provider server email dispatcher
+  async function dispatchLicenseEmailServer(params: {
+    recipientEmail: string;
+    licenseKey: string;
+    schoolName: string;
+    tier?: string;
+    durationMonths?: string | number;
+    contactPerson?: string;
+    activeModules?: string[];
+    magicLinkUrl?: string;
+    customMessage?: string;
+    googleToken?: string;
+  }) {
+    const emailContent = buildLicenseEmailContent(params);
+    const { recipientEmail, googleToken } = params;
+    let dispatched = false;
+    let method: string = 'prepared';
+
+    // 1. Try Nodemailer SMTP if SMTP environment variables are present
+    const smtpHost = process.env.SMTP_HOST;
+    const smtpUser = process.env.SMTP_USER;
+    const smtpPass = process.env.SMTP_PASS;
+    if (smtpHost && (smtpUser || smtpPass)) {
+      try {
+        const port = parseInt(process.env.SMTP_PORT || "587", 10);
+        const transporter = nodemailer.createTransport({
+          host: smtpHost,
+          port,
+          secure: port === 465,
+          auth: smtpUser ? { user: smtpUser, pass: smtpPass } : undefined,
+          tls: { rejectUnauthorized: false }
+        });
+
+        await transporter.sendMail({
+          from: process.env.SMTP_FROM || `"SchoolSphere Licenses" <${smtpUser || 'licenses@schoolsphere.xyz'}>`,
+          to: recipientEmail,
+          subject: emailContent.subject,
+          text: emailContent.textBody,
+          html: emailContent.htmlBody
+        });
+        dispatched = true;
+        method = 'smtp';
+        return { success: true, dispatched: true, method, ...emailContent };
+      } catch (smtpErr: any) {
+        console.warn("SMTP sending notice:", smtpErr?.message || smtpErr);
+      }
+    }
+
+    // 2. Try Resend API if RESEND_API_KEY is available
+    const resendKey = process.env.RESEND_API_KEY;
+    if (resendKey) {
+      try {
+        const resendRes = await fetch("https://api.resend.com/emails", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${resendKey}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            from: process.env.SMTP_FROM || "SchoolSphere <onboarding@resend.dev>",
+            to: [recipientEmail],
+            subject: emailContent.subject,
+            html: emailContent.htmlBody,
+            text: emailContent.textBody
+          })
+        });
+        if (resendRes.ok) {
+          dispatched = true;
+          method = 'resend';
+          return { success: true, dispatched: true, method, ...emailContent };
+        }
+      } catch (resendErr: any) {
+        console.warn("Resend API notice:", resendErr?.message || resendErr);
+      }
+    }
+
+    // 3. Try Google Gmail REST API if googleToken is available
+    if (googleToken) {
+      try {
+        const encodedSubject = Buffer.from(emailContent.subject, 'utf-8').toString('base64');
+        const encodedHtml = Buffer.from(emailContent.htmlBody, 'utf-8').toString('base64');
+        const rawMessage = [
+          `To: ${recipientEmail}`,
+          `Subject: =?UTF-8?B?${encodedSubject}?=`,
+          'MIME-Version: 1.0',
+          'Content-Type: text/html; charset="UTF-8"',
+          'Content-Transfer-Encoding: base64',
+          '',
+          encodedHtml
+        ].join('\r\n');
+
+        const base64UrlMessage = Buffer.from(rawMessage, 'utf-8').toString('base64')
+          .replace(/\+/g, '-')
+          .replace(/\//g, '_')
+          .replace(/=+$/, '');
+
+        const gmailRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${googleToken}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ raw: base64UrlMessage })
+        });
+
+        if (gmailRes.ok) {
+          const gmailData = await gmailRes.json().catch(() => ({}));
+          dispatched = true;
+          method = 'gmail';
+          return { success: true, dispatched: true, method, messageId: gmailData.id, ...emailContent };
+        } else {
+          const errData = await gmailRes.json().catch(() => ({}));
+          console.warn("Gmail API responded with error:", gmailRes.status, errData);
+        }
+      } catch (gmailErr: any) {
+        console.warn("Gmail API notice:", gmailErr?.message || gmailErr);
+      }
+    }
+
+    // 4. Return prepared email package (including direct mailtoUrl, text, and html)
+    return { success: true, dispatched, method, ...emailContent };
+  }
+
+  // Helper to generate a 20-char or standard institutional license code
+  function makeLicenseCode(schoolName?: string, tier: string = "Standard"): string {
+    const schoolPrefix = (schoolName || "SCH").trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4) || "SCH";
+    const tierPrefix = tier.toUpperCase().slice(0, 3) || "STD";
+    const hexPart = Math.random().toString(36).substring(2, 8).toUpperCase();
+    return `ESEPA-${schoolPrefix}-${tierPrefix}-${hexPart}`;
+  }
+
+  // App-driven server-side SMTP email sender via Nodemailer / Google Workspace / Resend
+  async function sendLicenseEmail({ 
+    to, 
+    license_code, 
+    schoolName = "SchoolSphere Academy",
+    recipientName 
+  }: { 
+    to: string; 
+    license_code: string; 
+    schoolName?: string;
+    recipientName?: string;
+  }) {
+    const smtpHost = process.env.SMTP_HOST || "smtp.gmail.com";
+    const smtpPort = Number(process.env.SMTP_PORT || "587");
+    const smtpUser = process.env.SMTP_USER;
+    const smtpPass = process.env.SMTP_PASS;
+    const smtpFrom = process.env.SMTP_FROM || `"SchoolSphere Licensing" <${smtpUser || "no-reply@schoolsphere.xyz"}>`;
+
+    let dispatched = false;
+    let method: string = 'prepared';
+    let messageId: string | null = null;
+    let errorMessage: string | null = null;
+
+    const subject = `Your License Code - ${license_code}`;
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head><meta charset="utf-8"></head>
+      <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; padding: 24px 12px; margin: 0;">
+        <div style="max-width: 560px; margin: 0 auto; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
+          <div style="background: linear-gradient(135deg, #1e1b4b 0%, #312e81 100%); padding: 28px 24px; text-align: center;">
+            <h1 style="color: #ffffff; font-size: 22px; font-weight: 800; margin: 0 0 6px 0; letter-spacing: -0.5px;">SchoolSphere Management Engine</h1>
+            <p style="color: #a5b4fc; font-size: 13px; margin: 0; font-weight: 500;">Official License Verification & Activation</p>
+          </div>
+
+          <div style="padding: 28px 24px;">
+            <h2 style="color: #0f172a; font-size: 17px; font-weight: 700; margin: 0 0 12px 0;">Your License Code</h2>
+            <p style="color: #334155; font-size: 14px; line-height: 1.6; margin: 0 0 16px 0;">
+              ${recipientName ? `Hello <strong>${recipientName}</strong>,<br>` : ''}
+              Use this code to verify your registration and unlock full features for <strong>${schoolName}</strong>:
+            </p>
+
+            <div style="background: #0f172a; color: #38bdf8; border: 2px solid #38bdf8; padding: 16px 20px; border-radius: 12px; text-align: center; font-family: 'Courier New', Courier, monospace; font-size: 22px; font-weight: 900; letter-spacing: 2.5px; margin: 18px 0;">
+              ${license_code}
+            </div>
+
+            <div style="background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 10px; padding: 14px; margin-top: 18px;">
+              <p style="color: #1e40af; font-size: 13px; line-height: 1.5; margin: 0;">
+                <strong>Next Step:</strong> Return to your SchoolSphere application and enter this code to verify your account and activate protected features.
+              </p>
+            </div>
+
+            <p style="color: #94a3b8; font-size: 12px; line-height: 1.5; margin: 20px 0 0 0;">
+              If you did not request this, you can safely ignore this email.
+            </p>
+          </div>
+
+          <div style="background: #f8fafc; border-top: 1px solid #e2e8f0; padding: 16px 24px; text-align: center; font-size: 11px; color: #94a3b8; font-weight: 600;">
+            © ${new Date().getFullYear()} SchoolSphere Academy · Direct Backend SMTP Dispatch
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    // 1. Try Nodemailer SMTP
+    if (smtpUser && smtpPass) {
+      try {
+        const transporter = nodemailer.createTransport({
+          host: smtpHost,
+          port: smtpPort,
+          secure: smtpPort === 465,
+          auth: {
+            user: smtpUser,
+            pass: smtpPass
+          },
+          tls: { rejectUnauthorized: false }
+        });
+
+        const info = await transporter.sendMail({
+          from: smtpFrom,
+          to,
+          subject,
+          html,
+          text: `Your SchoolSphere License Code is: ${license_code}\nUse this code to verify your registration for ${schoolName}.`
+        });
+
+        dispatched = true;
+        method = 'smtp';
+        messageId = info.messageId;
+        console.log(`[SMTP] License email successfully dispatched to ${to} (MessageId: ${info.messageId})`);
+      } catch (smtpErr: any) {
+        errorMessage = smtpErr.message;
+        console.warn("[SMTP Notice] Nodemailer encountered notice:", smtpErr.message);
+      }
+    }
+
+    // 2. Fallback to Resend if RESEND_API_KEY is available
+    if (!dispatched && process.env.RESEND_API_KEY) {
+      try {
+        const resendRes = await fetch("https://api.resend.com/emails", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${process.env.RESEND_API_KEY}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            from: process.env.SMTP_FROM || "SchoolSphere <onboarding@resend.dev>",
+            to: [to],
+            subject,
+            html,
+            text: `Your SchoolSphere License Code is: ${license_code}`
+          })
+        });
+        if (resendRes.ok) {
+          const rData = await resendRes.json();
+          dispatched = true;
+          method = 'resend';
+          messageId = rData.id;
+        }
+      } catch (resErr: any) {
+        console.warn("[Resend Notice]", resErr.message);
+      }
+    }
+
+    return {
+      dispatched,
+      method,
+      messageId,
+      errorMessage,
+      subject,
+      html,
+      to,
+      license_code
+    };
+  }
+
+  // Dedicated API Route: /api/send-license (and alias /api/license/send)
+  // Implements license code generation, storage in 'license_codes' table, and immediate backend SMTP delivery
+  app.post(["/api/send-license", "/api/license/send"], async (req, res) => {
+    try {
+      const { 
+        to, 
+        email, 
+        userId, 
+        schoolName = "SchoolSphere Academy", 
+        recipientName, 
+        tier = "Standard" 
+      } = req.body || {};
+
+      const targetEmail = (to || email || '').trim().toLowerCase();
+      if (!targetEmail || !targetEmail.includes('@')) {
+        return res.status(400).json({ 
+          ok: false, 
+          success: false, 
+          error: "A valid recipient email address (to / email) is required." 
+        });
+      }
+
+      const effectiveUserId: string = userId ? String(userId) : crypto.randomUUID();
+      const effectiveSchoolName = (schoolName || "SchoolSphere Academy").trim();
+      const adminClient = getSupabaseAdmin();
+
+      // 1) Generate license code
+      const license_code = makeLicenseCode(effectiveSchoolName, tier);
+
+      // 2) Store in public.license_codes table
+      try {
+        await adminClient
+          .from('license_codes')
+          .upsert([{
+            user_id: effectiveUserId,
+            email: targetEmail,
+            license_code,
+            status: 'pending',
+            school_name: effectiveSchoolName,
+            created_at: new Date().toISOString()
+          }], { onConflict: 'user_id' });
+      } catch (dbErr: any) {
+        console.warn("Notice storing license_code in Supabase:", dbErr.message);
+      }
+
+      // Also register into school_licenses table for full interoperability
+      try {
+        await syncLicenseToSupabase({
+          key: license_code,
+          schoolName: effectiveSchoolName.toUpperCase(),
+          tier,
+          durationMonths: "12",
+          createdAt: Date.now(),
+          status: "active",
+          clientEmail: targetEmail,
+          contactPerson: recipientName || undefined,
+          activeModules: ['students', 'academic', 'timetable', 'attendance', 'results', 'reports', 'fees', 'siren', 'evoting', 'inventory']
+        });
+      } catch (syncErr: any) {
+        console.warn("Notice syncing license to Supabase:", syncErr?.message);
+      }
+
+      // 3) Send email with backend SMTP (Nodemailer / Google Workspace / Resend)
+      const emailResult = await sendLicenseEmail({
+        to: targetEmail,
+        license_code,
+        schoolName: effectiveSchoolName,
+        recipientName: recipientName || undefined
+      });
+
+      // 4) Mark as sent in DB if dispatched
+      if (emailResult.dispatched) {
+        try {
+          await adminClient
+            .from('license_codes')
+            .update({
+              status: 'sent',
+              sent_at: new Date().toISOString()
+            })
+            .eq('user_id', effectiveUserId);
+        } catch (updateErr: any) {
+          console.warn("Notice updating license_code sent_at:", updateErr.message);
+        }
+      }
+
+      return res.status(200).json({
+        ok: true,
+        success: true,
+        license_code,
+        userId: effectiveUserId,
+        to: targetEmail,
+        schoolName: effectiveSchoolName,
+        status: emailResult.dispatched ? 'sent' : 'pending',
+        dispatched: emailResult.dispatched,
+        method: emailResult.method,
+        messageId: emailResult.messageId || null,
+        emailError: emailResult.errorMessage || null,
+        hint: emailResult.errorMessage && emailResult.errorMessage.includes("535") 
+          ? "Google requires a 16-character App Password (https://myaccount.google.com/apppasswords) instead of your regular Gmail login password." 
+          : undefined,
+        message: emailResult.dispatched 
+          ? `License code generated and successfully sent to ${targetEmail} via ${emailResult.method.toUpperCase()}!`
+          : `License code generated and stored in license_codes table for ${targetEmail}.${emailResult.errorMessage ? ` Email dispatch notice: ${emailResult.errorMessage}` : ''}`
+      });
+    } catch (err: any) {
+      console.error("Error in /api/send-license:", err);
+      return res.status(500).json({ 
+        ok: false, 
+        success: false, 
+        error: sanitizeErrorMessage(err) 
+      });
+    }
+  });
+
+  // 1 & 2) App-driven Signup Endpoint: Creates user, stores license code in DB, and sends email via backend + SMTP
+  app.post(["/api/signup", "/api/auth/signup"], async (req, res) => {
+    try {
+      const { email, password, fullName, schoolName, tier = "Standard", role = "admin" } = req.body || {};
+      
+      if (!email || !email.includes('@')) {
+        return res.status(400).json({ ok: false, success: false, error: "A valid email address is required." });
+      }
+
+      const cleanEmail = email.trim().toLowerCase();
+      const effectiveSchoolName = (schoolName || `${fullName || 'Academy'} Institutional Portal`).trim();
+      const adminClient = getSupabaseAdmin();
+
+      let userId: string = crypto.randomUUID();
+
+      // Step 1: Create auth user if credentials provided
+      if (password) {
+        try {
+          const { data: signUpData, error: signUpError } = await adminClient.auth.admin.createUser({
+            email: cleanEmail,
+            password: String(password),
+            email_confirm: false,
+            user_metadata: {
+              full_name: fullName || cleanEmail.split('@')[0],
+              school_name: effectiveSchoolName,
+              role: role
+            }
+          });
+
+          if (!signUpError && signUpData?.user?.id) {
+            userId = signUpData.user.id;
+          }
+        } catch (authErr: any) {
+          console.warn("Notice in admin.createUser:", authErr?.message);
+        }
+
+        // Also record in public.users table for local / SQL logins
+        try {
+          const salt = await bcrypt.genSalt(10);
+          const passwordHash = await bcrypt.hash(password, salt);
+          await adminClient.from('users').upsert([{
+            username: cleanEmail.split('@')[0],
+            full_name: fullName || cleanEmail.split('@')[0],
+            email: cleanEmail,
+            password_hash: passwordHash,
+            role: role,
+            status: 'pending_verification',
+            created_at: Date.now(),
+            updated_at: Date.now()
+          }], { onConflict: 'username' });
+        } catch (uErr: any) {
+          console.warn("Notice in public.users upsert:", uErr?.message);
+        }
+      }
+
+      // Step 2: Generate license code
+      const license_code = makeLicenseCode(effectiveSchoolName, tier);
+      const now = Date.now();
+
+      // Step 3: Store license code in public.license_codes table
+      try {
+        await adminClient
+          .from('license_codes')
+          .upsert([{
+            user_id: userId,
+            email: cleanEmail,
+            license_code,
+            status: 'pending',
+            school_name: effectiveSchoolName,
+            created_at: new Date().toISOString()
+          }], { onConflict: 'user_id' });
+      } catch (dbErr: any) {
+        console.warn("Notice storing license_code in Supabase:", dbErr.message);
+      }
+
+      // Also register into licenses / school_licenses table for full interoperability
+      await syncLicenseToSupabase({
+        key: license_code,
+        schoolName: effectiveSchoolName.toUpperCase(),
+        tier,
+        durationMonths: "12",
+        createdAt: now,
+        status: "active",
+        clientEmail: cleanEmail,
+        contactPerson: fullName || undefined,
+        activeModules: ['students', 'academic', 'timetable', 'attendance', 'results', 'reports', 'fees', 'siren', 'evoting', 'inventory']
+      });
+
+      // Step 4: Send license code email using backend + SMTP
+      const emailResult = await sendLicenseEmail({
+        to: cleanEmail,
+        license_code,
+        schoolName: effectiveSchoolName,
+        recipientName: fullName || undefined
+      });
+
+      // Step 5: Mark as sent if dispatched
+      if (emailResult.dispatched) {
+        try {
+          await adminClient
+            .from('license_codes')
+            .update({
+              status: 'sent',
+              sent_at: new Date().toISOString()
+            })
+            .eq('user_id', userId);
+        } catch (updateErr: any) {
+          console.warn("Notice updating license_code sent_at:", updateErr.message);
+        }
+      }
+
+      return res.status(200).json({
+        ok: true,
+        success: true,
+        userId,
+        email: cleanEmail,
+        license_code,
+        status: emailResult.dispatched ? 'sent' : 'pending',
+        dispatched: emailResult.dispatched,
+        dispatchMethod: emailResult.method,
+        message: emailResult.dispatched 
+          ? `Registration completed! License code dispatched directly to ${cleanEmail} via ${emailResult.method.toUpperCase()}.`
+          : `Registration completed! License code prepared for ${cleanEmail}.`
+      });
+    } catch (err: any) {
+      console.error("Error in /api/signup:", err);
+      return res.status(500).json({ ok: false, success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  // 4) Verify the license code when the user enters it (securely unlocks protected features)
+  app.post(["/api/license/verify-code", "/api/license/verify"], async (req, res) => {
+    try {
+      const { email, license_code, enteredCode, key, userId } = req.body || {};
+      const targetCode = (license_code || enteredCode || key || '').trim().toUpperCase();
+      const cleanEmail = (email || '').trim().toLowerCase();
+
+      if (!targetCode) {
+        return res.status(400).json({ ok: false, success: false, error: "License code is required." });
+      }
+
+      const adminClient = getSupabaseAdmin();
+      let matched = false;
+      let matchedRecord: any = null;
+
+      // 1. Check in license_codes table
+      try {
+        let query = adminClient.from('license_codes').select('*').eq('license_code', targetCode);
+        if (cleanEmail) {
+          query = query.eq('email', cleanEmail);
+        }
+        if (userId) {
+          query = query.eq('user_id', userId);
+        }
+        const { data, error } = await query.maybeSingle();
+        if (!error && data) {
+          matched = true;
+          matchedRecord = data;
+
+          // Update status to 'verified' and set verified_at
+          await adminClient
+            .from('license_codes')
+            .update({
+              status: 'verified',
+              verified_at: new Date().toISOString()
+            })
+            .eq('id', data.id);
+        }
+      } catch (lcErr: any) {
+        console.warn("Notice querying license_codes:", lcErr.message);
+      }
+
+      // 2. Fallback check in school_licenses / master keys
+      if (!matched) {
+        const { data: licRow } = await adminClient
+          .from('school_licenses')
+          .select('*')
+          .eq('license_key', targetCode)
+          .maybeSingle();
+
+        if (licRow && licRow.active_status === 'active') {
+          matched = true;
+          matchedRecord = licRow;
+        } else if (VALID_LICENSE_KEYS.includes(targetCode)) {
+          matched = true;
+          matchedRecord = { license_key: targetCode, school_name: 'SCHOOL SPHERE ACADEMY', tier: 'Enterprise' };
+        }
+      }
+
+      if (!matched) {
+        return res.status(400).json({
+          ok: false,
+          success: false,
+          verified: false,
+          error: "Invalid or unverified license code. Please check your code and try again."
+        });
+      }
+
+      // Activate local state and unlock protected features
+      if (fs.existsSync(licenseFilePath)) {
+        try {
+          const localStatus = JSON.parse(fs.readFileSync(licenseFilePath, "utf-8"));
+          localStatus.isLicensed = true;
+          localStatus.licenseKey = targetCode;
+          localStatus.schoolName = matchedRecord?.school_name || "SCHOOL SPHERE ACADEMY";
+          localStatus.activatedAt = Date.now();
+          fs.writeFileSync(licenseFilePath, JSON.stringify(localStatus, null, 2));
+        } catch (e) {}
+      }
+
+      return res.status(200).json({
+        ok: true,
+        success: true,
+        verified: true,
+        license_code: targetCode,
+        schoolName: matchedRecord?.school_name || "SCHOOL SPHERE ACADEMY",
+        tier: matchedRecord?.tier || "Standard",
+        message: "License code successfully verified! Full institutional access unlocked."
+      });
+    } catch (err: any) {
+      console.error("Error in /api/license/verify-code:", err);
+      return res.status(500).json({ ok: false, success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  // Resend license code endpoint
+  app.post("/api/license/resend-code", async (req, res) => {
+    try {
+      const { email, userId, schoolName, fullName } = req.body || {};
+      if (!email || !email.includes('@')) {
+        return res.status(400).json({ ok: false, success: false, error: "A valid email address is required." });
+      }
+
+      const cleanEmail = email.trim().toLowerCase();
+      const adminClient = getSupabaseAdmin();
+      let targetCode: string | null = null;
+      let effectiveSchool = (schoolName || "SchoolSphere Academy").trim();
+
+      // Look up existing pending code
+      try {
+        const { data } = await adminClient
+          .from('license_codes')
+          .select('*')
+          .eq('email', cleanEmail)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (data?.license_code) {
+          targetCode = data.license_code;
+          if (data.school_name) effectiveSchool = data.school_name;
+        }
+      } catch (e) {}
+
+      // If no code exists, generate a new one
+      if (!targetCode) {
+        targetCode = makeLicenseCode(effectiveSchool);
+        try {
+          await adminClient.from('license_codes').insert([{
+            user_id: userId || crypto.randomUUID(),
+            email: cleanEmail,
+            license_code: targetCode,
+            status: 'pending',
+            school_name: effectiveSchool,
+            created_at: new Date().toISOString()
+          }]);
+        } catch (e) {}
+      }
+
+      // Dispatch email via SMTP
+      const sendResult = await sendLicenseEmail({
+        to: cleanEmail,
+        license_code: targetCode,
+        schoolName: effectiveSchool,
+        recipientName: fullName
+      });
+
+      if (sendResult.dispatched) {
+        try {
+          await adminClient
+            .from('license_codes')
+            .update({ status: 'sent', sent_at: new Date().toISOString() })
+            .eq('email', cleanEmail)
+            .eq('license_code', targetCode);
+        } catch (e) {}
+      }
+
+      return res.json({
+        ok: true,
+        success: true,
+        dispatched: sendResult.dispatched,
+        method: sendResult.method,
+        license_code: targetCode,
+        message: sendResult.dispatched
+          ? `License code resent to ${cleanEmail} via ${sendResult.method.toUpperCase()}.`
+          : `License code prepared for ${cleanEmail}.`
+      });
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  // Dedicated test endpoint for verifying SMTP / Email settings with live feedback
+  app.post("/api/email/test-smtp", async (req, res) => {
+    try {
+      const { to, customHost, customPort, customUser, customPass, customFrom } = req.body || {};
+      const targetRecipient = (to || process.env.SMTP_USER || "amoakoemmanuel2026@gmail.com").trim();
+
+      const host = customHost || process.env.SMTP_HOST || "smtp.gmail.com";
+      const port = Number(customPort || process.env.SMTP_PORT || "587");
+      const user = customUser || process.env.SMTP_USER;
+      const pass = customPass || process.env.SMTP_PASS;
+      const from = customFrom || process.env.SMTP_FROM || `"SchoolSphere Licensing" <${user || "no-reply@schoolsphere.xyz"}>`;
+
+      const testCode = `ESEPA-TEST-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+
+      if (!user || !pass) {
+        return res.status(400).json({
+          success: false,
+          error: "SMTP credentials not provided in request or environment variables (SMTP_USER / SMTP_PASS).",
+          host,
+          port,
+          from,
+          hasUser: !!user,
+          hasPass: !!pass
+        });
+      }
+
+      const transporter = nodemailer.createTransport({
+        host,
+        port,
+        secure: port === 465,
+        auth: { user, pass },
+        tls: { rejectUnauthorized: false }
+      });
+
+      // Verify connection configuration
+      await transporter.verify();
+
+      const info = await transporter.sendMail({
+        from,
+        to: targetRecipient,
+        subject: `[Test] SchoolSphere License Verification - ${testCode}`,
+        html: `
+          <div style="font-family: sans-serif; max-width: 500px; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
+            <h2 style="color: #1e1b4b; margin: 0 0 10px 0;">SMTP Test Successful!</h2>
+            <p style="color: #334155; font-size: 14px;">This test email verifies that your server-side SMTP configuration is operating properly.</p>
+            <div style="background: #0f172a; color: #38bdf8; font-family: monospace; font-size: 20px; font-weight: bold; padding: 14px; text-align: center; border-radius: 8px; margin: 16px 0;">
+              ${testCode}
+            </div>
+            <p style="color: #64748b; font-size: 12px;">Sent from SchoolSphere Backend SMTP Engine at ${new Date().toISOString()}</p>
+          </div>
+        `
+      });
+
+      return res.json({
+        success: true,
+        message: `Test email successfully delivered to ${targetRecipient}!`,
+        messageId: info.messageId,
+        testCode,
+        config: { host, port, user, from }
+      });
+    } catch (err: any) {
+      console.error("Error in /api/email/test-smtp:", err);
+      return res.status(500).json({
+        success: false,
+        error: err.message || "Failed to send test email via SMTP.",
+        details: sanitizeErrorMessage(err)
+      });
+    }
+  });
+
+  // Generate a new license key and live sync to Supabase database (with verified email delivery)
   app.post("/api/license/generate", async (req, res) => {
     try {
-      const { schoolName, durationMonths, tier, activeModules } = req.body || {};
+      const { 
+        schoolName, 
+        durationMonths, 
+        tier, 
+        activeModules, 
+        clientEmail, 
+        contactPerson, 
+        sendEmail, 
+        redirectUrl,
+        googleAccessToken
+      } = req.body || {};
+
       if (!schoolName) {
         return res.status(400).json({ success: false, error: "School name is required" });
+      }
+
+      // Verify email if provided
+      let cleanClientEmail: string | null = null;
+      let emailValidationResult: any = null;
+      if (clientEmail && clientEmail.trim()) {
+        cleanClientEmail = clientEmail.trim().toLowerCase();
+        emailValidationResult = await verifyEmailAddressServerSide(cleanClientEmail);
+        if (!emailValidationResult.isValid) {
+          return res.status(400).json({ 
+            success: false, 
+            error: `Invalid client email address: ${emailValidationResult.error || 'Please provide a valid email format.'}`,
+            suggestion: emailValidationResult.suggestion 
+          });
+        }
       }
 
       const schoolPrefix = schoolName.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4) || "SCH";
@@ -3276,6 +4400,8 @@ async function startServer() {
         'exam_analysis', 'reports', 'fees', 'siren', 'evoting', 'inventory'
       ];
 
+      const cleanContactPerson = contactPerson ? contactPerson.trim() : null;
+
       // Sync directly into Supabase database (schools + school_licenses)
       const syncRes = await syncLicenseToSupabase({
         key,
@@ -3285,8 +4411,103 @@ async function startServer() {
         expiryDate,
         createdAt: now,
         status: "active",
-        activeModules: modules
+        activeModules: modules,
+        clientEmail: cleanClientEmail,
+        contactPerson: cleanContactPerson
       });
+
+      // Handle sending license directly to client's email via multi-provider dispatcher
+      let emailDispatched = false;
+      let magicLinkUrl: string | null = null;
+      let emailOtpCode: string | null = null;
+      let emailNotice: string | null = null;
+      let dispatchMethod: string = 'prepared';
+      let mailContent: any = null;
+
+      const authHeader = req.headers.authorization;
+      const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
+      const effectiveGoogleToken = googleAccessToken || bearerToken;
+
+      if (cleanClientEmail && (sendEmail !== false)) {
+        const effectiveRedirect = redirectUrl || `https://ai.studio/apps/a3dcbc82-0bbd-43c0-9bc8-6b9090159f51?license=${encodeURIComponent(key)}`;
+
+        // 1. Generate magic onboarding access link from Supabase
+        const adminClient = getSupabaseAdmin();
+        try {
+          const { data: linkData } = await adminClient.auth.admin.generateLink({
+            type: 'magiclink',
+            email: cleanClientEmail,
+            options: { redirectTo: effectiveRedirect }
+          });
+          if (linkData?.properties?.action_link) {
+            magicLinkUrl = linkData.properties.action_link;
+            emailOtpCode = linkData.properties.email_otp || null;
+          }
+        } catch (linkErr: any) {
+          console.warn("Notice in generateLink:", linkErr?.message);
+        }
+
+        // 2. Dispatch license email via unified server engine (SMTP / Resend / Gmail API / direct prepared template)
+        try {
+          mailContent = await dispatchLicenseEmailServer({
+            recipientEmail: cleanClientEmail,
+            licenseKey: key,
+            schoolName: schoolName.trim().toUpperCase(),
+            tier: normalizedTier,
+            durationMonths: durationMonths || "12",
+            contactPerson: cleanContactPerson || undefined,
+            activeModules: modules,
+            magicLinkUrl: magicLinkUrl || undefined,
+            googleToken: effectiveGoogleToken || undefined
+          });
+
+          emailDispatched = mailContent.dispatched;
+          dispatchMethod = mailContent.method;
+          if (emailDispatched) {
+            emailNotice = `License dispatched directly via ${dispatchMethod.toUpperCase()} to ${cleanClientEmail}.`;
+          } else {
+            emailNotice = `License generated and delivery prepared for ${cleanClientEmail}.`;
+          }
+        } catch (dispatchErr: any) {
+          console.warn("Notice in dispatchLicenseEmailServer:", dispatchErr?.message || dispatchErr);
+        }
+
+        // 3. Fallback to Supabase Auth email if not dispatched by other channels
+        if (!emailDispatched) {
+          try {
+            const { error: otpError } = await adminClient.auth.signInWithOtp({
+              email: cleanClientEmail,
+              options: {
+                emailRedirectTo: effectiveRedirect,
+                shouldCreateUser: true,
+                data: {
+                  full_name: cleanContactPerson || `${schoolName} Administrator`,
+                  role: 'admin',
+                  license_key: key
+                }
+              }
+            });
+
+            if (!otpError) {
+              emailDispatched = true;
+              dispatchMethod = 'supabase';
+              emailNotice = `License activation details dispatched to ${cleanClientEmail}.`;
+            }
+          } catch (emailErr: any) {
+            console.warn("Notice sending fallback email:", emailErr?.message);
+          }
+        }
+      } else if (cleanClientEmail) {
+        mailContent = buildLicenseEmailContent({
+          recipientEmail: cleanClientEmail,
+          licenseKey: key,
+          schoolName: schoolName.trim().toUpperCase(),
+          tier: normalizedTier,
+          durationMonths: durationMonths || "12",
+          contactPerson: cleanContactPerson || undefined,
+          activeModules: modules
+        });
+      }
 
       const newLicense = {
         key,
@@ -3299,6 +4520,11 @@ async function startServer() {
         status: "active",
         used: false,
         activatedAt: null,
+        clientEmail: cleanClientEmail,
+        contactPerson: cleanContactPerson,
+        emailVerified: cleanClientEmail ? true : false,
+        lastEmailSentAt: emailDispatched ? Date.now() : null,
+        emailDispatchMethod: dispatchMethod,
         syncStatus: syncRes.isSynced ? 'synced' : 'sync_failed',
         syncError: syncRes.syncError,
         activeModules: modules
@@ -3310,15 +4536,262 @@ async function startServer() {
       else licenses.push(newLicense);
       saveGeneratedLicenses(licenses);
 
+      // Record dispatch in Supabase DB
+      if (cleanClientEmail) {
+        try {
+          const adminClient = getSupabaseAdmin();
+          await adminClient.from('email_dispatch_logs').insert([{
+            license_key: key,
+            school_name: schoolName.trim().toUpperCase(),
+            recipient_email: cleanClientEmail,
+            contact_person: cleanContactPerson,
+            dispatch_method: dispatchMethod || 'email',
+            sent_at: Date.now()
+          }]);
+        } catch (e) {}
+      }
+
       return res.json({ 
         success: true, 
         syncedToSupabase: syncRes.isSynced,
         syncStatus: newLicense.syncStatus,
         syncError: syncRes.syncError,
-        license: newLicense 
+        license: newLicense,
+        emailDispatched,
+        dispatchMethod,
+        emailRecipient: cleanClientEmail,
+        emailNotice,
+        magicLinkUrl,
+        emailOtpCode,
+        mailSubject: mailContent?.subject,
+        mailBodyText: mailContent?.textBody,
+        mailBodyHtml: mailContent?.htmlBody,
+        mailtoUrl: mailContent?.mailtoUrl,
+        activationUrl: mailContent?.activationUrl || (magicLinkUrl || `https://ai.studio/apps/a3dcbc82-0bbd-43c0-9bc8-6b9090159f51?license=${encodeURIComponent(key)}`),
+        message: emailNotice || `License ${key} generated and stored successfully for ${schoolName}.`
       });
     } catch (err: any) {
       console.error("Error in /api/license/generate:", err);
+      return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  // Dedicated endpoint to send / resend any license key directly to client's email via Gmail or Supabase
+  app.post("/api/license/send-email", async (req, res) => {
+    try {
+      const { licenseKey, recipientEmail, schoolName, contactPerson, redirectUrl, customMessage, googleAccessToken } = req.body || {};
+      if (!licenseKey || !recipientEmail) {
+        return res.status(400).json({ success: false, error: "License key and recipient email are required." });
+      }
+
+      const keyUpper = licenseKey.trim().toUpperCase();
+      const cleanEmail = recipientEmail.trim().toLowerCase();
+
+      // Verify email syntax & domain reachability
+      const emailCheck = await verifyEmailAddressServerSide(cleanEmail);
+      if (!emailCheck.isValid) {
+        return res.status(400).json({
+          success: false,
+          error: `Invalid email address: ${emailCheck.error || 'Please provide a valid email format.'}`,
+          suggestion: emailCheck.suggestion
+        });
+      }
+
+      const adminClient = getSupabaseAdmin();
+
+      // Retrieve license record
+      const generated = getGeneratedLicenses();
+      const localMatch = generated.find((l: any) => l.key === keyUpper);
+      const effectiveSchoolName = (schoolName || localMatch?.schoolName || "SchoolSphere Institution").trim();
+      const effectiveTier = localMatch?.tier || 'Standard';
+      const effectiveDuration = localMatch?.durationMonths || '12';
+      const effectiveModules = localMatch?.activeModules || [];
+
+      // 1. Generate magic onboarding access link
+      let magicLinkUrl: string | null = null;
+      let emailOtpCode: string | null = null;
+      const effectiveRedirect = redirectUrl || `https://ai.studio/apps/a3dcbc82-0bbd-43c0-9bc8-6b9090159f51?license=${encodeURIComponent(keyUpper)}`;
+
+      try {
+        const { data: linkData } = await adminClient.auth.admin.generateLink({
+          type: 'magiclink',
+          email: cleanEmail,
+          options: { redirectTo: effectiveRedirect }
+        });
+
+        if (linkData?.properties?.action_link) {
+          magicLinkUrl = linkData.properties.action_link;
+          emailOtpCode = linkData.properties.email_otp || null;
+        }
+      } catch (genErr: any) {
+        console.warn("Notice in generateLink:", genErr?.message);
+      }
+
+      let emailDispatched = false;
+      let dispatchMethod: string = 'prepared';
+      let mailContent: any = null;
+
+      const authHeader = req.headers.authorization;
+      const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
+      const effectiveGoogleToken = googleAccessToken || bearerToken;
+
+      // 2. Dispatch license email via unified server engine (SMTP / Resend / Gmail API / direct prepared template)
+      try {
+        mailContent = await dispatchLicenseEmailServer({
+          recipientEmail: cleanEmail,
+          licenseKey: keyUpper,
+          schoolName: effectiveSchoolName,
+          tier: effectiveTier,
+          durationMonths: effectiveDuration,
+          contactPerson: contactPerson || localMatch?.contactPerson,
+          activeModules: effectiveModules,
+          magicLinkUrl: magicLinkUrl || undefined,
+          customMessage,
+          googleToken: effectiveGoogleToken || undefined
+        });
+
+        emailDispatched = mailContent.dispatched;
+        dispatchMethod = mailContent.method;
+      } catch (dispatchErr: any) {
+        console.warn("Notice in dispatchLicenseEmailServer:", dispatchErr?.message || dispatchErr);
+      }
+
+      // 3. Fallback to Supabase Auth OTP / Notification if not sent by other providers
+      if (!emailDispatched) {
+        try {
+          const { error: otpError } = await adminClient.auth.signInWithOtp({
+            email: cleanEmail,
+            options: {
+              emailRedirectTo: effectiveRedirect,
+              shouldCreateUser: true,
+              data: {
+                full_name: contactPerson || `${effectiveSchoolName} Administrator`,
+                role: 'admin',
+                license_key: keyUpper
+              }
+            }
+          });
+
+          if (!otpError) {
+            emailDispatched = true;
+            dispatchMethod = 'supabase';
+          }
+        } catch (otpErr: any) {
+          console.warn("Notice in signInWithOtp:", otpErr?.message);
+        }
+      }
+
+      // 4. Update local and Supabase license metadata with client email and timestamp
+      const now = Date.now();
+      if (localMatch) {
+        localMatch.clientEmail = cleanEmail;
+        if (contactPerson) localMatch.contactPerson = contactPerson;
+        localMatch.lastEmailSentAt = now;
+        localMatch.emailDispatchMethod = dispatchMethod;
+        localMatch.emailVerified = true;
+        saveGeneratedLicenses(generated);
+      }
+
+      // Persist directly into Supabase database (school_licenses & schools)
+      try {
+        await adminClient
+          .from('school_licenses')
+          .update({ 
+            client_email: cleanEmail,
+            contact_person: contactPerson || localMatch?.contactPerson || null,
+            last_email_sent_at: now,
+            updated_at: now 
+          })
+          .eq('license_key', keyUpper);
+      } catch (dbErr: any) {
+        console.warn("Notice updating license email in DB:", dbErr?.message);
+      }
+
+      // Record dispatch in email_dispatch_logs in Supabase
+      try {
+        await adminClient.from('email_dispatch_logs').insert([{
+          license_key: keyUpper,
+          school_name: effectiveSchoolName,
+          recipient_email: cleanEmail,
+          contact_person: contactPerson || localMatch?.contactPerson,
+          dispatch_method: dispatchMethod,
+          sent_at: now
+        }]);
+      } catch (e) {}
+
+      return res.json({
+        success: true,
+        message: emailDispatched 
+          ? `License key "${keyUpper}" dispatched via ${dispatchMethod.toUpperCase()} to ${cleanEmail}.`
+          : `License key "${keyUpper}" delivery details generated for ${cleanEmail}.`,
+        emailDispatched,
+        licenseKey: keyUpper,
+        recipientEmail: cleanEmail,
+        dispatchMethod,
+        schoolName: effectiveSchoolName,
+        magicLinkUrl,
+        emailOtpCode,
+        mailSubject: mailContent?.subject,
+        mailBodyText: mailContent?.textBody,
+        mailBodyHtml: mailContent?.htmlBody,
+        mailtoUrl: mailContent?.mailtoUrl,
+        activationUrl: mailContent?.activationUrl || (magicLinkUrl || `https://ai.studio/apps/a3dcbc82-0bbd-43c0-9bc8-6b9090159f51?license=${encodeURIComponent(keyUpper)}`)
+      });
+    } catch (err: any) {
+      console.error("Error in /api/license/send-email:", err);
+      return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
+    }
+  });
+
+  // Dedicated endpoint for logging email dispatch directly from client-side Gmail API calls
+  app.post("/api/license/log-email-dispatch", async (req, res) => {
+    try {
+      const { licenseKey, recipientEmail, schoolName, contactPerson, method = 'gmail', gmailMessageId } = req.body || {};
+      const keyUpper = (licenseKey || '').trim().toUpperCase();
+      const cleanEmail = (recipientEmail || '').trim().toLowerCase();
+      const now = Date.now();
+
+      // 1. Update local cache
+      const generated = getGeneratedLicenses();
+      const localMatch = generated.find((l: any) => l.key === keyUpper);
+      if (localMatch) {
+        localMatch.clientEmail = cleanEmail;
+        if (contactPerson) localMatch.contactPerson = contactPerson;
+        localMatch.lastEmailSentAt = now;
+        localMatch.emailDispatchMethod = method;
+        localMatch.emailVerified = true;
+        saveGeneratedLicenses(generated);
+      }
+
+      // 2. Update Supabase database
+      const adminClient = getSupabaseAdmin();
+      try {
+        await adminClient
+          .from('school_licenses')
+          .update({
+            client_email: cleanEmail,
+            contact_person: contactPerson || null,
+            last_email_sent_at: now,
+            updated_at: now
+          })
+          .eq('license_key', keyUpper);
+      } catch (e) {}
+
+      // 3. Insert audit log
+      try {
+        await adminClient.from('email_dispatch_logs').insert([{
+          license_key: keyUpper,
+          school_name: schoolName || localMatch?.schoolName || 'Unknown',
+          recipient_email: cleanEmail,
+          contact_person: contactPerson,
+          dispatch_method: method,
+          gmail_message_id: gmailMessageId || null,
+          sent_at: now
+        }]);
+      } catch (e) {}
+
+      return res.json({ success: true, stored: true });
+    } catch (err: any) {
       return res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
     }
   });

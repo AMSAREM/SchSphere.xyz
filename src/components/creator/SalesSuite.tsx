@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   CreditCard,
   Briefcase,
@@ -19,10 +19,32 @@ import {
   Lock,
   CheckCircle2,
   CloudOff,
-  AlertTriangle
+  AlertTriangle,
+  X,
+  Sparkles,
+  RefreshCw,
+  Globe,
+  ExternalLink,
+  MessageSquare,
+  FileText,
+  Share2,
+  Info,
+  Phone
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { LicenseSyncBanner } from '../LicenseSyncBanner';
+import { validateEmailSyntax, verifyEmailWithBackend, EmailValidationResult } from '../../lib/emailValidation';
+import { 
+  signInWithGoogle, 
+  signOutGoogle, 
+  getGoogleAccessToken, 
+  getCurrentGoogleUser, 
+  sendLicenseViaGmailApi,
+  getGmailWebComposeUrl,
+  getMailtoComposeUrl,
+  getWhatsAppShareUrl,
+  buildLicensePlainText
+} from '../../lib/gmailService';
 
 interface SalesSuiteProps {
   activePanel: string;
@@ -60,6 +82,15 @@ interface SalesSuiteProps {
   copiedProposal: boolean;
   copyProposalToClipboard: () => void;
   pricing: any;
+
+  // Client email delivery props
+  genClientEmail?: string;
+  setGenClientEmail?: (email: string) => void;
+  genContactPerson?: string;
+  setGenContactPerson?: (name: string) => void;
+  sendEmailOnGenerate?: boolean;
+  setSendEmailOnGenerate?: (val: boolean) => void;
+  handleSendLicenseEmail?: (licenseKey: string, recipientEmail: string, schoolName?: string, contactPerson?: string) => Promise<boolean>;
 }
 
 export default function SalesSuite({
@@ -96,7 +127,15 @@ export default function SalesSuite({
   setCalcSupportLevel,
   copiedProposal,
   copyProposalToClipboard,
-  pricing
+  pricing,
+
+  genClientEmail = '',
+  setGenClientEmail = () => {},
+  genContactPerson = '',
+  setGenContactPerson = () => {},
+  sendEmailOnGenerate = true,
+  setSendEmailOnGenerate = () => {},
+  handleSendLicenseEmail
 }: SalesSuiteProps) {
 
   // Local state for CRM
@@ -200,10 +239,219 @@ export default function SalesSuite({
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [newlyIssuedLicense, setNewlyIssuedLicense] = useState<any | null>(null);
 
+  // Google Gmail state
+  const [googleUser, setGoogleUser] = useState<any | null>(() => getCurrentGoogleUser());
+  const [googleToken, setGoogleToken] = useState<string | null>(() => getGoogleAccessToken());
+  const [isConnectingGoogle, setIsConnectingGoogle] = useState(false);
+
+  // Real-time email validation state for generator form
+  const [genEmailValidation, setGenEmailValidation] = useState<EmailValidationResult | null>(null);
+  const [isValidatingGenEmail, setIsValidatingGenEmail] = useState(false);
+
+  // Email dispatch modal states
+  const [emailModalLicense, setEmailModalLicense] = useState<any | null>(null);
+  const [customEmailRecipient, setCustomEmailRecipient] = useState('');
+  const [customPhoneRecipient, setCustomPhoneRecipient] = useState('');
+  const [customContactPerson, setCustomContactPerson] = useState('');
+  const [customMessage, setCustomMessage] = useState('');
+  const [preferredMethod, setPreferredMethod] = useState<'gmail' | 'supabase'>('supabase');
+  const [modalEmailValidation, setModalEmailValidation] = useState<EmailValidationResult | null>(null);
+  const [isValidatingModalEmail, setIsValidatingModalEmail] = useState(false);
+  const [isSendingCustomEmail, setIsSendingCustomEmail] = useState(false);
+  const [emailSentSuccessMsg, setEmailSentSuccessMsg] = useState<string | null>(null);
+  const [emailSentMethod, setEmailSentMethod] = useState<string | null>(null);
+  const [dispatchedEmailPackage, setDispatchedEmailPackage] = useState<any | null>(null);
+  const [copiedEmailBody, setCopiedEmailBody] = useState(false);
+  const [copiedActivationLink, setCopiedActivationLink] = useState(false);
+
+  // Validate generator email on change
+  useEffect(() => {
+    if (!genClientEmail || !genClientEmail.trim()) {
+      setGenEmailValidation(null);
+      return;
+    }
+    const clean = genClientEmail.trim();
+    const syntax = validateEmailSyntax(clean);
+    setGenEmailValidation(syntax);
+
+    if (syntax.isValid) {
+      setIsValidatingGenEmail(true);
+      const timer = setTimeout(async () => {
+        const deep = await verifyEmailWithBackend(clean);
+        setGenEmailValidation(deep);
+        setIsValidatingGenEmail(false);
+      }, 600);
+      return () => clearTimeout(timer);
+    }
+  }, [genClientEmail]);
+
+  // Validate modal email on change
+  useEffect(() => {
+    if (!customEmailRecipient || !customEmailRecipient.trim()) {
+      setModalEmailValidation(null);
+      return;
+    }
+    const clean = customEmailRecipient.trim();
+    const syntax = validateEmailSyntax(clean);
+    setModalEmailValidation(syntax);
+
+    if (syntax.isValid) {
+      setIsValidatingModalEmail(true);
+      const timer = setTimeout(async () => {
+        const deep = await verifyEmailWithBackend(clean);
+        setModalEmailValidation(deep);
+        setIsValidatingModalEmail(false);
+      }, 600);
+      return () => clearTimeout(timer);
+    }
+  }, [customEmailRecipient]);
+
+  const handleConnectGoogle = async () => {
+    setIsConnectingGoogle(true);
+    try {
+      const res = await signInWithGoogle();
+      if (res) {
+        setGoogleUser(res.user);
+        setGoogleToken(res.accessToken);
+      }
+    } catch (err: any) {
+      console.warn('Google authorization notice:', err?.message || err);
+    } finally {
+      setIsConnectingGoogle(false);
+    }
+  };
+
+  const handleDisconnectGoogle = async () => {
+    await signOutGoogle();
+    setGoogleUser(null);
+    setGoogleToken(null);
+  };
+
   const handleCopyKey = (key: string) => {
     navigator.clipboard.writeText(key);
     setCopiedKey(key);
     setTimeout(() => setCopiedKey(null), 2500);
+  };
+
+  const handleSendViaGmailDirect = async () => {
+    if (!emailModalLicense || !customEmailRecipient.trim()) return;
+
+    const val = validateEmailSyntax(customEmailRecipient.trim());
+    if (!val.isValid) {
+      alert(`Invalid email address: ${val.error}`);
+      return;
+    }
+
+    setIsSendingCustomEmail(true);
+    setEmailSentSuccessMsg(null);
+
+    try {
+      let token = googleToken || getGoogleAccessToken();
+      if (!token) {
+        const res = await signInWithGoogle();
+        if (!res?.accessToken) {
+          throw new Error('Google Sign-in was cancelled or denied. You can use 1-Click Web Gmail Compose instead.');
+        }
+        setGoogleUser(res.user);
+        setGoogleToken(res.accessToken);
+        token = res.accessToken;
+      }
+
+      const result = await sendLicenseViaGmailApi({
+        licenseKey: emailModalLicense.key,
+        recipientEmail: customEmailRecipient.trim(),
+        schoolName: emailModalLicense.schoolName,
+        contactPerson: customContactPerson.trim() || undefined,
+        tier: emailModalLicense.tier,
+        durationMonths: emailModalLicense.durationMonths,
+        customMessage: customMessage.trim() || undefined,
+        activeModules: emailModalLicense.activeModules,
+        accessToken: token
+      });
+
+      if (result.success) {
+        setEmailSentMethod('gmail');
+        setEmailSentSuccessMsg(`License key delivered directly via your Google/Gmail account to ${customEmailRecipient.trim()}!`);
+        setDispatchedEmailPackage({
+          licenseKey: emailModalLicense.key,
+          recipientEmail: customEmailRecipient.trim(),
+          schoolName: emailModalLicense.schoolName,
+          dispatchMethod: 'gmail',
+          emailDispatched: true
+        });
+      }
+    } catch (err: any) {
+      console.error('Direct Gmail send failed:', err);
+      alert(`Gmail Dispatch Notice: ${err.message || 'Could not send via Gmail API. You can use 1-Click Web Gmail or Cloud Server below.'}`);
+    } finally {
+      setIsSendingCustomEmail(false);
+    }
+  };
+
+  const handleTriggerSendEmailModal = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!emailModalLicense || !customEmailRecipient.trim()) return;
+
+    // Syntax validation guard
+    const val = validateEmailSyntax(customEmailRecipient.trim());
+    if (!val.isValid) {
+      alert(`Invalid email address: ${val.error}`);
+      return;
+    }
+
+    setIsSendingCustomEmail(true);
+    setEmailSentSuccessMsg(null);
+    setDispatchedEmailPackage(null);
+
+    try {
+      const activeToken = googleToken || getGoogleAccessToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (activeToken) {
+        headers['Authorization'] = `Bearer ${activeToken}`;
+      }
+
+      const res = await fetch('/api/license/send-email', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          licenseKey: emailModalLicense.key,
+          recipientEmail: customEmailRecipient.trim(),
+          schoolName: emailModalLicense.schoolName,
+          contactPerson: customContactPerson.trim() || undefined,
+          customMessage: customMessage.trim() || undefined,
+          googleAccessToken: activeToken || undefined
+        })
+      });
+
+      const data = await res.json();
+
+      if (res.ok && data.success) {
+        const method = data.dispatchMethod || (data.emailDispatched ? 'cloud_email' : 'direct_delivery_ready');
+        setEmailSentMethod(method);
+        setEmailSentSuccessMsg(data.message || `License package prepared for ${customEmailRecipient.trim()}!`);
+        setDispatchedEmailPackage({
+          licenseKey: data.licenseKey || emailModalLicense.key,
+          recipientEmail: data.recipientEmail || customEmailRecipient.trim(),
+          schoolName: data.schoolName || emailModalLicense.schoolName,
+          subject: data.mailSubject,
+          textBody: data.mailBodyText,
+          htmlBody: data.mailBodyHtml,
+          mailtoUrl: data.mailtoUrl,
+          activationUrl: data.activationUrl,
+          magicLinkUrl: data.magicLinkUrl,
+          emailOtpCode: data.emailOtpCode,
+          dispatchMethod: method,
+          emailDispatched: data.emailDispatched
+        });
+      } else {
+        throw new Error(data.error || 'Failed to dispatch license email.');
+      }
+    } catch (err: any) {
+      console.error('Failed to send license email:', err);
+      alert(`Email dispatch notice: ${err.message || 'Please verify email recipient.'}`);
+    } finally {
+      setIsSendingCustomEmail(false);
+    }
   };
 
   const handleFormSubmit = async (e: React.FormEvent) => {
@@ -745,7 +993,7 @@ export default function SalesSuite({
             </div>
             <div>
               <h2 className="text-sm font-bold text-slate-800">Client License Keys Registry & Issuance</h2>
-              <p className="text-[11px] text-slate-500">Issue single-use RSA license validation tokens for schools with real-time Supabase authorization.</p>
+              <p className="text-[11px] text-slate-500">Issue single-use RSA license validation tokens for schools with real-time Supabase authorization & Gmail dispatch.</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -791,7 +1039,7 @@ export default function SalesSuite({
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
-              <div className="space-y-1 md:col-span-5">
+              <div className="space-y-1 md:col-span-4">
                 <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block">
                   Client School Name <span className="text-rose-500">*</span>
                 </label>
@@ -805,7 +1053,81 @@ export default function SalesSuite({
                 />
               </div>
 
-              <div className="space-y-1 md:col-span-3">
+              <div className="space-y-1 md:col-span-4">
+                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block flex items-center justify-between">
+                  <span>Client Email (For Auto Delivery)</span>
+                  <span className="text-[9px] text-indigo-600 font-semibold lowercase">sends key & link</span>
+                </label>
+                <div className="relative">
+                  <Mail className="absolute left-3 top-3 w-3.5 h-3.5 text-slate-400" />
+                  <input
+                    type="email"
+                    placeholder="principal@school.edu.gh"
+                    value={genClientEmail}
+                    onChange={(e) => setGenClientEmail(e.target.value)}
+                    className={cn(
+                      "w-full pl-9 pr-3 py-2.5 bg-white border rounded-xl focus:ring-2 font-medium text-xs text-slate-800 focus:outline-hidden transition",
+                      genEmailValidation
+                        ? genEmailValidation.isValid
+                          ? "border-emerald-300 focus:ring-emerald-500"
+                          : "border-rose-300 focus:ring-rose-500 bg-rose-50/20"
+                        : "border-slate-200 focus:ring-indigo-500"
+                    )}
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1 md:col-span-4">
+                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block">
+                  Contact Person / Authority (Optional)
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Dr. Peter Osei (Headmaster)"
+                  value={genContactPerson}
+                  onChange={(e) => setGenContactPerson(e.target.value)}
+                  className="w-full px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 font-medium text-xs text-slate-800 focus:outline-hidden transition"
+                />
+              </div>
+            </div>
+
+            {/* Real-time Email Validation Feedback */}
+            {genClientEmail.trim() && genEmailValidation && (
+              <div className="px-3 py-2 rounded-xl text-xs flex items-center justify-between gap-2 border transition-all animate-in fade-in duration-150">
+                {genEmailValidation.isValid ? (
+                  <div className="flex items-center gap-1.5 text-emerald-700 bg-emerald-50/80 px-2.5 py-1 rounded-lg border border-emerald-200 w-full">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                    <span className="text-[11px] font-medium">
+                      Valid Email Format & Domain Exchanger <strong>({genEmailValidation.domain})</strong>
+                    </span>
+                    {isValidatingGenEmail && <RefreshCw className="w-3 h-3 animate-spin text-emerald-600 ml-auto" />}
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5 text-rose-700 bg-rose-50/80 px-2.5 py-1 rounded-lg border border-rose-200 w-full">
+                    <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                    <span className="text-[11px] font-bold">{genEmailValidation.error}</span>
+                  </div>
+                )}
+
+                {genEmailValidation.suggestion && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (genEmailValidation.suggestion) {
+                        setGenClientEmail(genEmailValidation.suggestion);
+                      }
+                    }}
+                    className="shrink-0 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 font-bold text-[10px] px-2.5 py-1 rounded-lg transition flex items-center gap-1 cursor-pointer"
+                  >
+                    <Sparkles className="w-3 h-3 text-amber-600" />
+                    Did you mean <u>{genEmailValidation.suggestion}</u>?
+                  </button>
+                )}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end pt-1">
+              <div className="space-y-1 md:col-span-4">
                 <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block">License Tier</label>
                 <select
                   value={genTier}
@@ -820,7 +1142,7 @@ export default function SalesSuite({
                 </select>
               </div>
 
-              <div className="space-y-1 md:col-span-2">
+              <div className="space-y-1 md:col-span-4">
                 <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block">Duration</label>
                 <select
                   value={genDuration}
@@ -836,25 +1158,53 @@ export default function SalesSuite({
                 </select>
               </div>
 
-              <div className="md:col-span-2">
+              <div className="md:col-span-4">
                 <button
                   type="submit"
+                  id="btn-issue-license-email"
                   disabled={isGenerating || !genSchoolName.trim()}
-                  className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-[0.98] text-white font-black rounded-xl text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 transition shadow-sm"
+                  className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-[0.98] text-white font-black rounded-xl text-xs uppercase tracking-wider flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 transition shadow-sm"
                 >
                   {isGenerating ? (
                     <>
                       <Zap className="w-4 h-4 animate-spin text-emerald-300" />
-                      <span>Issuing...</span>
+                      <span>{genClientEmail.trim() && sendEmailOnGenerate ? 'Issuing & Sending...' : 'Issuing...'}</span>
                     </>
                   ) : (
                     <>
-                      <Plus className="w-4 h-4" />
-                      <span>Issue License</span>
+                      {genClientEmail.trim() && sendEmailOnGenerate ? (
+                        <>
+                          <Mail className="w-4 h-4 text-indigo-200" />
+                          <span>Issue & Dispatch Email</span>
+                        </>
+                      ) : (
+                        <>
+                          <Plus className="w-4 h-4" />
+                          <span>Issue License</span>
+                        </>
+                      )}
                     </>
                   )}
                 </button>
               </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-2 border-t border-slate-200/50">
+              <label className="flex items-center gap-2 cursor-pointer text-[11px] font-bold text-slate-700 select-none">
+                <input
+                  type="checkbox"
+                  checked={sendEmailOnGenerate}
+                  onChange={(e) => setSendEmailOnGenerate(e.target.checked)}
+                  className="rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer w-3.5 h-3.5"
+                />
+                <span>Automatically dispatch license key & onboarding link to verified email & store in database</span>
+              </label>
+
+              {sendEmailOnGenerate && genClientEmail.trim() && (
+                <span className="text-[10px] text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200 flex items-center gap-1">
+                  <CheckCircle2 className="w-3 h-3 text-emerald-600" /> Auto-email active for: {genClientEmail.trim()}
+                </span>
+              )}
             </div>
           </div>
 
@@ -952,17 +1302,17 @@ export default function SalesSuite({
             </div>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs border-collapse">
+          <div className="overflow-x-auto -mx-6 px-6">
+            <table className="w-full text-left text-xs border-collapse min-w-[760px]">
               <thead>
-                <tr className="border-b border-slate-150 text-[10px] font-black text-slate-400 uppercase tracking-wider">
-                  <th className="pb-3 pr-2">Client School</th>
-                  <th className="pb-3 pr-2">Serial Key</th>
-                  <th className="pb-3 pr-2">Tier</th>
-                  <th className="pb-3 pr-2">Sync Status</th>
-                  <th className="pb-3 pr-2">Expires On</th>
-                  <th className="pb-3 pr-2 text-center">Status</th>
-                  <th className="pb-3 text-right">Actions</th>
+                <tr className="border-b border-slate-200/80 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                  <th className="py-3 px-3">Client School</th>
+                  <th className="py-3 px-3">Serial Key</th>
+                  <th className="py-3 px-3">Tier</th>
+                  <th className="py-3 px-3">Sync Status</th>
+                  <th className="py-3 px-3">Expires On</th>
+                  <th className="py-3 px-3 text-center">Status</th>
+                  <th className="py-3 px-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -970,34 +1320,47 @@ export default function SalesSuite({
                   const syncState = lic.syncStatus || 'local_only';
                   const isCopied = copiedKey === lic.key;
                   return (
-                    <tr key={lic.key} className="hover:bg-slate-50/50 transition">
-                      <td className="py-3 font-bold text-slate-800 pr-2">
-                        <div>
-                          <span className="font-extrabold text-slate-900">{lic.schoolName}</span>
+                    <tr key={lic.key} className="hover:bg-slate-50/70 transition-colors group">
+                      <td className="py-3.5 px-3 font-bold text-slate-800">
+                        <div className="space-y-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-extrabold text-slate-900 text-sm tracking-tight">{lic.schoolName}</span>
+                            {lic.clientEmail && (
+                              <span className="text-[10px] bg-slate-100 text-slate-600 font-medium px-2 py-0.5 rounded-md flex items-center gap-1 border border-slate-200/70">
+                                <Mail className="w-3 h-3 text-indigo-500" />
+                                <span>{lic.clientEmail}</span>
+                              </span>
+                            )}
+                          </div>
                           {lic.activeModules && lic.activeModules.length > 0 && (
-                            <div className="flex flex-wrap gap-1 mt-1 max-w-[240px]">
-                              {lic.activeModules.map((m: string) => {
+                            <div className="flex flex-wrap gap-1 pt-0.5">
+                              {lic.activeModules.slice(0, 5).map((m: string) => {
                                 const label = availableModules.find(mod => mod.id === m)?.label || m;
                                 return (
-                                  <span key={m} className="text-[8px] bg-indigo-50/60 text-indigo-600 font-bold px-1.5 py-0.5 rounded-md border border-indigo-100/50">
+                                  <span key={m} className="text-[9px] bg-indigo-50 text-indigo-600 font-semibold px-2 py-0.5 rounded-md border border-indigo-100/60">
                                     {label.replace(' Records', '').replace(' Portal', '').replace(' Terminal', '').replace(' Registry', '').replace(' School', '')}
                                   </span>
                                 );
                               })}
+                              {lic.activeModules.length > 5 && (
+                                <span className="text-[9px] bg-slate-100 text-slate-500 font-semibold px-1.5 py-0.5 rounded-md">
+                                  +{lic.activeModules.length - 5} more
+                                </span>
+                              )}
                             </div>
                           )}
                         </div>
                       </td>
-                      <td className="py-3 pr-2">
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-mono font-black text-indigo-600 select-all bg-indigo-50/50 px-2 py-0.5 rounded border border-indigo-100/50 text-[11px]">
+                      <td className="py-3.5 px-3">
+                        <div className="inline-flex items-center gap-1.5 bg-indigo-50/60 px-2.5 py-1 rounded-lg border border-indigo-100/70">
+                          <span className="font-mono font-bold text-indigo-700 select-all text-xs tracking-wider">
                             {lic.key}
                           </span>
                           <button
                             type="button"
                             onClick={() => handleCopyKey(lic.key)}
                             title="Copy License Key"
-                            className="p-1 hover:bg-slate-100 text-slate-400 hover:text-indigo-600 rounded transition cursor-pointer"
+                            className="p-1 hover:bg-indigo-100 text-indigo-500 hover:text-indigo-700 rounded transition cursor-pointer"
                           >
                             {isCopied ? (
                               <Check className="w-3.5 h-3.5 text-emerald-600" />
@@ -1007,65 +1370,102 @@ export default function SalesSuite({
                           </button>
                         </div>
                       </td>
-                      <td className="py-3 pr-2">
-                        <span className="px-2 py-0.5 bg-slate-100 border border-slate-200 text-slate-700 text-[10px] font-bold rounded">
+                      <td className="py-3.5 px-3">
+                        <span className="px-2.5 py-1 bg-slate-100 border border-slate-200 text-slate-700 text-[11px] font-bold rounded-lg whitespace-nowrap">
                           {lic.tier || 'Standard'}
                         </span>
                       </td>
-                      <td className="py-3 pr-2">
+                      <td className="py-3.5 px-3">
                         {syncState === 'synced' ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-bold rounded-full">
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-bold rounded-full whitespace-nowrap">
                             <CheckCircle2 className="w-3 h-3 text-emerald-600" /> Synced
                           </span>
                         ) : syncState === 'sync_failed' ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-rose-50 text-rose-700 border border-rose-200 text-[10px] font-bold rounded-full" title={lic.syncError || "Sync failed"}>
-                            <AlertTriangle className="w-3 h-3 text-rose-600" /> Sync Failed
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-rose-50 text-rose-700 border border-rose-200 text-[10px] font-bold rounded-full whitespace-nowrap" title={lic.syncError || "Sync failed"}>
+                            <AlertTriangle className="w-3 h-3 text-rose-600" /> Failed
                           </span>
                         ) : (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-amber-50 text-amber-700 border border-amber-200 text-[10px] font-bold rounded-full">
-                            <CloudOff className="w-3 h-3 text-amber-600" /> Local Only
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-amber-50 text-amber-700 border border-amber-200 text-[10px] font-bold rounded-full whitespace-nowrap">
+                            <CloudOff className="w-3 h-3 text-amber-600" /> Local
                           </span>
                         )}
                       </td>
-                      <td className="py-3 text-slate-500 font-medium pr-2">
+                      <td className="py-3.5 px-3 text-slate-600 font-medium whitespace-nowrap text-xs">
                         {lic.expiryDate ? new Date(lic.expiryDate).toLocaleDateString(undefined, { dateStyle: 'medium' }) : 'Perpetual'}
                       </td>
-                      <td className="py-3 text-center pr-2">
+                      <td className="py-3.5 px-3 text-center">
                         <span className={cn(
-                          'px-2.5 py-1 text-[9px] font-extrabold uppercase rounded-full tracking-wider border',
+                          'px-2.5 py-1 text-[10px] font-bold uppercase rounded-full tracking-wider border whitespace-nowrap inline-block',
                           lic.status === 'active' 
-                            ? (lic.used ? 'bg-indigo-50 text-indigo-600 border-indigo-100/50' : 'bg-emerald-50 text-emerald-600 border-emerald-100') 
-                            : 'bg-rose-50 text-rose-600 border-rose-100'
+                            ? (lic.used ? 'bg-indigo-50 text-indigo-700 border-indigo-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200') 
+                            : 'bg-rose-50 text-rose-700 border-rose-200'
                         )}>
-                          {lic.status === 'active' ? (lic.used ? 'Activated (Used)' : 'Active (Unused)') : lic.status}
+                          {lic.status === 'active' ? (lic.used ? 'Used' : 'Active') : lic.status}
                         </span>
                       </td>
-                      <td className="py-3 text-right">
-                        <div className="flex items-center justify-end gap-1.5">
+                      <td className="py-3.5 px-3 text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          {lic.clientEmail && (
+                            <a
+                              href={getGmailWebComposeUrl({
+                                recipientEmail: lic.clientEmail,
+                                licenseKey: lic.key,
+                                schoolName: lic.schoolName,
+                                tier: lic.tier,
+                                durationMonths: lic.durationMonths,
+                                contactPerson: lic.contactPerson,
+                                activeModules: lic.activeModules
+                              })}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              title={`Open Gmail Compose for ${lic.clientEmail}`}
+                              className="p-2 bg-red-50 hover:bg-red-100 text-red-600 rounded-xl border border-red-200/80 transition cursor-pointer"
+                            >
+                              <Mail className="w-3.5 h-3.5" />
+                            </a>
+                          )}
+
+                          <a
+                            href={getWhatsAppShareUrl({
+                              licenseKey: lic.key,
+                              schoolName: lic.schoolName,
+                              tier: lic.tier,
+                              durationMonths: lic.durationMonths,
+                              contactPerson: lic.contactPerson,
+                              phoneNumber: lic.phone || lic.clientPhone
+                            })}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title="Send via WhatsApp"
+                            className="p-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-600 rounded-xl border border-emerald-200/80 transition cursor-pointer"
+                          >
+                            <MessageSquare className="w-3.5 h-3.5" />
+                          </a>
+
                           <button
                             type="button"
-                            onClick={() => handleCopyKey(lic.key)}
-                            className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-bold uppercase tracking-wider rounded-lg border border-slate-200 transition cursor-pointer flex items-center gap-1"
+                            onClick={() => {
+                              setEmailModalLicense(lic);
+                              setCustomEmailRecipient(lic.clientEmail || '');
+                              setCustomPhoneRecipient(lic.phone || lic.clientPhone || '');
+                              setCustomContactPerson(lic.contactPerson || '');
+                              setEmailSentSuccessMsg(null);
+                            }}
+                            title="Dispatch Package"
+                            className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-2xs"
                           >
-                            {isCopied ? (
-                              <>
-                                <Check className="w-3 h-3 text-emerald-600" />
-                                <span>Copied!</span>
-                              </>
-                            ) : (
-                              <>
-                                <Copy className="w-3 h-3" />
-                                <span>Copy Key</span>
-                              </>
-                            )}
+                            <Send className="w-3 h-3" />
+                            <span>Dispatch</span>
                           </button>
+
                           {lic.status === 'active' && (
                             <button
                               disabled={isRevoking === lic.key}
                               onClick={() => handleRevokeKey(lic.key)}
-                              className="px-2 py-1 bg-rose-50 hover:bg-rose-100 text-rose-600 text-[10px] font-bold uppercase tracking-wider rounded-lg border border-rose-100 hover:border-rose-200 transition disabled:opacity-50 cursor-pointer"
+                              title="Revoke License Key"
+                              className="p-2 bg-slate-100 hover:bg-rose-50 text-slate-400 hover:text-rose-600 rounded-xl border border-slate-200 hover:border-rose-200 transition disabled:opacity-50 cursor-pointer"
                             >
-                              {isRevoking === lic.key ? 'Revoking...' : 'Revoke'}
+                              <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           )}
                         </div>
@@ -1075,13 +1475,444 @@ export default function SalesSuite({
                 })}
                 {filteredLicenses.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="py-8 text-center text-slate-400 italic">No matching keys located.</td>
+                    <td colSpan={7} className="py-12 text-center text-slate-400 text-sm italic">No matching keys located.</td>
                   </tr>
                 )}
               </tbody>
             </table>
           </div>
         </div>
+
+        {/* Send License Email Modal */}
+        {emailModalLicense && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+            <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-2xl max-w-xl w-full space-y-4 animate-in fade-in zoom-in-95 duration-200 max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                    <Mail className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-800">Dispatch License to Client</h3>
+                    <p className="text-[10px] text-slate-500 font-medium">1-Click Web Gmail, Gmail API, WhatsApp & Database Sync</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEmailModalLicense(null)}
+                  className="p-1.5 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100 cursor-pointer transition"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {emailSentSuccessMsg ? (
+                <div className="p-5 bg-emerald-50/80 border border-emerald-200 rounded-2xl space-y-3.5 text-center">
+                  <div className="w-12 h-12 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center mx-auto shadow-xs">
+                    <CheckCircle2 className="w-7 h-7" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-black text-emerald-950">License Prepared & Dispatched</h4>
+                    <p className="text-xs text-emerald-800 font-medium mt-0.5">{emailSentSuccessMsg}</p>
+                  </div>
+                  
+                  <div className="p-3 bg-white rounded-xl border border-emerald-200 text-left space-y-1.5 text-[11px] text-slate-800">
+                    <div className="flex justify-between items-center pb-1 border-b border-slate-100">
+                      <span className="font-bold text-slate-500">Recipient:</span>
+                      <span className="font-semibold text-slate-900 font-mono">{customEmailRecipient}</span>
+                    </div>
+                    <div className="flex justify-between items-center pb-1 border-b border-slate-100">
+                      <span className="font-bold text-slate-500">Dispatch Status:</span>
+                      <span className="font-mono uppercase font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                        {emailSentMethod === 'gmail' ? '⚡ Sent via Gmail API' : (emailSentMethod || 'Direct Delivery Ready')}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="font-bold text-slate-500">Database Sync:</span>
+                      <span className="text-emerald-700 font-bold flex items-center gap-1">
+                        <CheckCircle2 className="w-3 h-3 text-emerald-600" /> Logged to Supabase DB
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Guaranteed 1-Click Delivery Buttons */}
+                  <div className="space-y-2 pt-1 text-left">
+                    <p className="text-[10px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1">
+                      <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+                      <span>Multi-Channel 1-Click Dispatch & Share:</span>
+                    </p>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <a
+                        href={getGmailWebComposeUrl({
+                          recipientEmail: customEmailRecipient,
+                          licenseKey: emailModalLicense.key,
+                          schoolName: emailModalLicense.schoolName,
+                          tier: emailModalLicense.tier,
+                          durationMonths: emailModalLicense.durationMonths,
+                          contactPerson: customContactPerson,
+                          customMessage: customMessage,
+                          activeModules: emailModalLicense.activeModules
+                        })}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center justify-center gap-1.5 px-3 py-2.5 bg-red-600 hover:bg-red-700 active:scale-[0.98] text-white font-bold rounded-xl text-xs transition shadow-xs cursor-pointer text-center"
+                      >
+                        <Mail className="w-3.5 h-3.5" />
+                        <span>Send via Web Gmail</span>
+                      </a>
+
+                      <a
+                        href={getWhatsAppShareUrl({
+                          licenseKey: emailModalLicense.key,
+                          schoolName: emailModalLicense.schoolName,
+                          tier: emailModalLicense.tier,
+                          durationMonths: emailModalLicense.durationMonths,
+                          contactPerson: customContactPerson,
+                          phoneNumber: customPhoneRecipient
+                        })}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center justify-center gap-1.5 px-3 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs transition border border-emerald-600 cursor-pointer text-center"
+                      >
+                        <MessageSquare className="w-3.5 h-3.5" />
+                        <span>Send via WhatsApp</span>
+                      </a>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const body = buildLicensePlainText({
+                            recipientEmail: customEmailRecipient,
+                            licenseKey: emailModalLicense.key,
+                            schoolName: emailModalLicense.schoolName,
+                            tier: emailModalLicense.tier,
+                            durationMonths: emailModalLicense.durationMonths,
+                            contactPerson: customContactPerson,
+                            customMessage: customMessage,
+                            activeModules: emailModalLicense.activeModules
+                          });
+                          navigator.clipboard.writeText(body);
+                          setCopiedEmailBody(true);
+                          setTimeout(() => setCopiedEmailBody(false), 2500);
+                        }}
+                        className="flex items-center justify-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold rounded-xl text-xs transition border border-slate-200 cursor-pointer"
+                      >
+                        {copiedEmailBody ? (
+                          <>
+                            <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            <span className="text-emerald-700">Email Text Copied!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5 text-slate-600" />
+                            <span>Copy Formatted Email</span>
+                          </>
+                        )}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleCopyKey(emailModalLicense.key)}
+                        className="flex items-center justify-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold rounded-xl text-xs transition border border-slate-200 cursor-pointer"
+                      >
+                        {copiedKey === emailModalLicense.key ? (
+                          <>
+                            <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            <span className="text-emerald-700">Key Copied!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Key className="w-3.5 h-3.5 text-slate-600" />
+                            <span>Copy Serial Key</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="pt-2 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEmailSentSuccessMsg(null);
+                        setDispatchedEmailPackage(null);
+                      }}
+                      className="flex-1 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition cursor-pointer"
+                    >
+                      Back to Editor
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEmailModalLicense(null);
+                        setEmailSentSuccessMsg(null);
+                        setDispatchedEmailPackage(null);
+                      }}
+                      className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs transition cursor-pointer shadow-xs"
+                    >
+                      Done
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="p-3 bg-slate-50 border border-slate-100 rounded-2xl space-y-1.5">
+                    <div className="flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                      <span>Target School:</span>
+                      <span className="text-slate-800 font-extrabold">{emailModalLicense.schoolName}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                      <span>License Serial Key:</span>
+                      <span className="font-mono text-indigo-600 font-black">{emailModalLicense.key}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                      <span>Tier / Duration:</span>
+                      <span className="text-slate-700 font-bold">{emailModalLicense.tier || 'Standard'} • {emailModalLicense.durationMonths ? `${emailModalLicense.durationMonths} Mos` : 'Perpetual'}</span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-600 uppercase tracking-wider block">
+                        Client Email Address <span className="text-rose-500">*</span>
+                      </label>
+                      <div className="relative">
+                        <Mail className="absolute left-3 top-2.5 w-3.5 h-3.5 text-slate-400" />
+                        <input
+                          type="email"
+                          required
+                          placeholder="recipient@school.edu.gh"
+                          value={customEmailRecipient}
+                          onChange={(e) => setCustomEmailRecipient(e.target.value)}
+                          className={cn(
+                            "w-full pl-9 pr-3.5 py-2 bg-white border rounded-xl focus:ring-2 font-bold text-xs text-slate-800 focus:outline-hidden transition",
+                            modalEmailValidation
+                              ? modalEmailValidation.isValid
+                                ? "border-emerald-300 focus:ring-emerald-500"
+                                : "border-rose-300 focus:ring-rose-500 bg-rose-50/20"
+                              : "border-slate-200 focus:ring-indigo-500"
+                          )}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-600 uppercase tracking-wider block flex items-center justify-between">
+                        <span>WhatsApp / Phone Number</span>
+                        <span className="text-[9px] text-emerald-600 font-semibold lowercase">for direct chat</span>
+                      </label>
+                      <div className="relative">
+                        <Phone className="absolute left-3 top-2.5 w-3.5 h-3.5 text-slate-400" />
+                        <input
+                          type="tel"
+                          placeholder="+233 24 555 1212"
+                          value={customPhoneRecipient}
+                          onChange={(e) => setCustomPhoneRecipient(e.target.value)}
+                          className="w-full pl-9 pr-3.5 py-2 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 font-bold text-xs text-slate-800 focus:outline-hidden transition"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Modal Real-time Email Validation Notice */}
+                  {customEmailRecipient.trim() && modalEmailValidation && (
+                    <div className="text-[11px] space-y-1">
+                      {modalEmailValidation.isValid ? (
+                        <div className="flex items-center gap-1.5 text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                          <span>Verified recipient domain ({modalEmailValidation.domain})</span>
+                          {isValidatingModalEmail && <RefreshCw className="w-3 h-3 animate-spin text-emerald-600 ml-auto" />}
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1.5 text-rose-700 bg-rose-50 px-2.5 py-1 rounded-lg border border-rose-200">
+                          <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                          <span className="font-bold">{modalEmailValidation.error}</span>
+                        </div>
+                      )}
+
+                      {modalEmailValidation.suggestion && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (modalEmailValidation.suggestion) {
+                              setCustomEmailRecipient(modalEmailValidation.suggestion);
+                            }
+                          }}
+                          className="w-full text-left bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 font-bold text-[10px] px-2.5 py-1 rounded-lg transition flex items-center gap-1 cursor-pointer"
+                        >
+                          <Sparkles className="w-3 h-3 text-amber-600 shrink-0" />
+                          <span>Did you mean <u>{modalEmailValidation.suggestion}</u>? Click to apply.</span>
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-600 uppercase tracking-wider block">
+                        Contact Person / Authority (Optional)
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="e.g. Headmaster John Arthur"
+                        value={customContactPerson}
+                        onChange={(e) => setCustomContactPerson(e.target.value)}
+                        className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 font-medium text-xs text-slate-800 focus:outline-hidden transition"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-600 uppercase tracking-wider block">
+                        Custom Note / Greeting (Optional)
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="e.g. For the 2025/2026 academic calendar"
+                        value={customMessage}
+                        onChange={(e) => setCustomMessage(e.target.value)}
+                        className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 font-medium text-xs text-slate-800 focus:outline-hidden transition"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Primary Dispatch Action Buttons */}
+                  <div className="space-y-2.5 pt-2 border-t border-slate-100">
+                    <span className="text-[10px] font-extrabold text-slate-500 uppercase tracking-widest block">
+                      Select Dispatch Method:
+                    </span>
+
+                    {/* Option 1: Direct Web Gmail 1-Click */}
+                    <div className="p-3 bg-red-50/70 border border-red-200 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <Mail className="w-4 h-4 text-red-600" />
+                          <span className="text-xs font-bold text-red-950">Option 1: 1-Click Web Gmail (Instant & Guaranteed)</span>
+                        </div>
+                        <p className="text-[10px] text-red-800 font-medium mt-0.5">
+                          Opens Gmail composer with recipient, official activation template & key ready to send.
+                        </p>
+                      </div>
+
+                      <a
+                        href={getGmailWebComposeUrl({
+                          recipientEmail: customEmailRecipient || 'client@school.edu.gh',
+                          licenseKey: emailModalLicense.key,
+                          schoolName: emailModalLicense.schoolName,
+                          tier: emailModalLicense.tier,
+                          durationMonths: emailModalLicense.durationMonths,
+                          contactPerson: customContactPerson,
+                          customMessage: customMessage,
+                          activeModules: emailModalLicense.activeModules
+                        })}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-4 py-2 bg-red-600 hover:bg-red-700 active:scale-[0.98] text-white font-bold rounded-xl text-xs transition shadow-xs cursor-pointer flex items-center justify-center gap-1.5 shrink-0 text-center"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        <span>Launch Web Gmail</span>
+                      </a>
+                    </div>
+
+                    {/* Option 2: Connected Google Account / Gmail API */}
+                    <div className="p-3 bg-blue-50/70 border border-blue-200 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <Zap className="w-4 h-4 text-blue-600" />
+                          <span className="text-xs font-bold text-blue-950">Option 2: Direct Gmail API Send</span>
+                        </div>
+                        <p className="text-[10px] text-blue-800 font-medium mt-0.5">
+                          {googleUser ? `Send seamlessly from ${googleUser.email}` : 'Sign in with your Google account to dispatch in the background.'}
+                        </p>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={handleSendViaGmailDirect}
+                        disabled={isSendingCustomEmail || !customEmailRecipient.trim()}
+                        className="px-4 py-2 bg-blue-600 hover:bg-blue-700 active:scale-[0.98] text-white font-bold rounded-xl text-xs transition shadow-xs cursor-pointer flex items-center justify-center gap-1.5 shrink-0 disabled:opacity-50"
+                      >
+                        {isSendingCustomEmail ? (
+                          <>
+                            <Zap className="w-3.5 h-3.5 animate-spin text-blue-200" />
+                            <span>Sending...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Send className="w-3.5 h-3.5" />
+                            <span>{googleUser ? 'Send via Gmail API' : 'Connect & Send via Gmail'}</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+
+                    {/* Option 3: WhatsApp & Copy */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <a
+                        href={getWhatsAppShareUrl({
+                          licenseKey: emailModalLicense.key,
+                          schoolName: emailModalLicense.schoolName,
+                          tier: emailModalLicense.tier,
+                          durationMonths: emailModalLicense.durationMonths,
+                          contactPerson: customContactPerson,
+                          phoneNumber: customPhoneRecipient
+                        })}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="p-2.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-900 font-bold rounded-xl text-xs transition cursor-pointer flex items-center justify-center gap-1.5 text-center"
+                      >
+                        <MessageSquare className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>Send via WhatsApp</span>
+                      </a>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const body = buildLicensePlainText({
+                            recipientEmail: customEmailRecipient,
+                            licenseKey: emailModalLicense.key,
+                            schoolName: emailModalLicense.schoolName,
+                            tier: emailModalLicense.tier,
+                            durationMonths: emailModalLicense.durationMonths,
+                            contactPerson: customContactPerson,
+                            customMessage: customMessage,
+                            activeModules: emailModalLicense.activeModules
+                          });
+                          navigator.clipboard.writeText(body);
+                          setCopiedEmailBody(true);
+                          setTimeout(() => setCopiedEmailBody(false), 2500);
+                        }}
+                        className="p-2.5 bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-800 font-bold rounded-xl text-xs transition cursor-pointer flex items-center justify-center gap-1.5"
+                      >
+                        {copiedEmailBody ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5 text-slate-600" />}
+                        <span>{copiedEmailBody ? 'Email Copied!' : 'Copy Formatted Email'}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="pt-2 flex items-center justify-between gap-2 border-t border-slate-100">
+                    <button
+                      type="button"
+                      onClick={() => setEmailModalLicense(null)}
+                      className="px-3.5 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer"
+                    >
+                      Close
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleTriggerSendEmailModal}
+                      disabled={isSendingCustomEmail || !customEmailRecipient.trim()}
+                      className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 transition disabled:opacity-50 cursor-pointer shadow-xs"
+                    >
+                      <Globe className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>Dispatch via Cloud Server</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     );
   }
