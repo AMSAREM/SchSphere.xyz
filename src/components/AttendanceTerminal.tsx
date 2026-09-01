@@ -254,8 +254,8 @@ export default function AttendanceTerminal() {
               className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between group hover:border-indigo-200 transition-colors"
             >
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 bg-slate-100 rounded-full flex items-center justify-center text-slate-600 font-bold text-xs">
-                  {student.firstName[0]}{student.lastName[0]}
+                <div className="w-10 h-10 bg-slate-100 rounded-full flex items-center justify-center text-slate-600 font-bold text-xs uppercase">
+                  {(student.firstName?.[0] || '')}{(student.lastName?.[0] || '') || 'S'}
                 </div>
                 <div>
                   <div className="flex items-center gap-2">

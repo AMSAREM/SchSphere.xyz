@@ -347,7 +347,7 @@ export default function UserManagement() {
                     <td className="px-6 py-4">
                       <div className="flex items-center gap-3">
                         <div className="w-9 h-9 bg-linear-to-br from-indigo-500/10 to-purple-500/10 dark:from-indigo-500/20 dark:to-purple-500/20 text-indigo-600 dark:text-indigo-400 rounded-xl flex items-center justify-center font-bold text-sm border border-indigo-200/50 dark:border-indigo-800/50">
-                          {user.fullName ? user.fullName[0].toUpperCase() : user.username[0].toUpperCase()}
+                          {user.fullName ? user.fullName[0]?.toUpperCase() : (user.username?.[0]?.toUpperCase() || 'U')}
                         </div>
                         <div>
                           <p className="text-sm font-bold text-slate-800 dark:text-slate-200">{user.fullName || user.full_name || user.username}</p>

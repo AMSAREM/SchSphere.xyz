@@ -112,14 +112,20 @@ export default function ReportTerminal() {
     }
   }, [classes, selectedClass]);
   
-  const classStudents = useMemo(() => {
-    return students.filter(s => s.class === selectedClass);
-  }, [students, selectedClass]);
-
   const classResults = useLiveQuery(
     () => db.results.where('class').equals(selectedClass).and(r => r.term === selectedTerm).toArray(),
     [selectedClass, selectedTerm]
   ) || [];
+
+  const classStudents = useMemo(() => {
+    const studentIdsWithResults = new Set(classResults.map(r => r.studentId));
+    return students.filter(s => 
+      s.class === selectedClass || 
+      studentIdsWithResults.has(s.studentId) ||
+      (s.previousClasses && s.previousClasses.includes(selectedClass)) ||
+      (s.classHistory && s.classHistory.some(h => h.class === selectedClass))
+    );
+  }, [students, selectedClass, classResults]);
 
   const termReports = useLiveQuery(
     () => db.termReports.where('term').equals(selectedTerm).toArray(),
@@ -250,10 +256,13 @@ export default function ReportTerminal() {
   }, [students, classes]);
 
   const debtorList = useMemo(() => {
+    const search = (searchTerm || '').toLowerCase().trim();
     return students.filter(s => {
+      if (!s) return false;
       const balance = (s.totalFees || 0) - (s.feesPaid || 0);
-      const matchesSearch = `${s.firstName} ${s.lastName}`.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                            s.studentId.toLowerCase().includes(searchTerm.toLowerCase());
+      const fullName = `${s.firstName || ''} ${s.lastName || ''}`.toLowerCase();
+      const studentId = (s.studentId || '').toLowerCase();
+      const matchesSearch = !search || fullName.includes(search) || studentId.includes(search);
       return balance > 0 && matchesSearch;
     });
   }, [students, searchTerm]);
@@ -921,10 +930,14 @@ export default function ReportTerminal() {
                 </div>
 
                 <div className="space-y-1 max-h-[600px] overflow-y-auto pr-2 custom-scrollbar">
-                  {students?.filter(s => 
-                    `${s.firstName} ${s.lastName}`.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                    s.studentId.toLowerCase().includes(searchTerm.toLowerCase())
-                  ).slice(0, 20).map(s => (
+                  {students?.filter(s => {
+                    if (!s) return false;
+                    const search = (searchTerm || '').toLowerCase().trim();
+                    if (!search) return true;
+                    const fullName = `${s.firstName || ''} ${s.lastName || ''}`.toLowerCase();
+                    const studentId = (s.studentId || '').toLowerCase();
+                    return fullName.includes(search) || studentId.includes(search);
+                  }).slice(0, 20).map(s => (
                     <button
                       key={s.id}
                       onClick={() => setSelectedStudentId(s.studentId)}
@@ -940,7 +953,7 @@ export default function ReportTerminal() {
                           "w-10 h-10 rounded-full flex items-center justify-center font-black text-sm uppercase",
                           selectedStudentId === s.studentId ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-400"
                         )}>
-                          {s.firstName[0]}{s.lastName[0]}
+                          {(s.firstName?.[0] || '')}{(s.lastName?.[0] || '') || 'S'}
                         </div>
                         <div className="text-left leading-tight">
                           <p className="font-bold text-sm leading-none">{s.firstName} {s.lastName}</p>

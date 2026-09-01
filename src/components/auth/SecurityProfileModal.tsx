@@ -222,7 +222,7 @@ export function SecurityProfileModal({ isOpen, onClose }: SecurityProfileModalPr
               <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/60 flex items-center justify-between flex-wrap gap-4">
                 <div className="flex items-center gap-3.5">
                   <div className="w-12 h-12 rounded-full bg-linear-to-br from-indigo-500 to-purple-600 text-white flex items-center justify-center font-bold text-lg shadow-sm">
-                    {user.fullName ? user.fullName[0].toUpperCase() : user.username[0].toUpperCase()}
+                    {user.fullName ? user.fullName[0]?.toUpperCase() : (user.username?.[0]?.toUpperCase() || 'U')}
                   </div>
                   <div>
                     <h3 className="font-bold text-slate-900 dark:text-white text-base">{user.fullName || user.username}</h3>

@@ -107,9 +107,12 @@ export default function InventoryManagement() {
 
   // Filter & Search Logic: Stock
   const filteredItems = useMemo(() => {
+    const query = (searchQuery || '').toLowerCase().trim();
     return inventoryList.filter(item => {
-      const matchesSearch = item.itemName.toLowerCase().includes(searchQuery.toLowerCase()) || 
-                            (item.location || '').toLowerCase().includes(searchQuery.toLowerCase());
+      if (!item) return false;
+      const itemName = (item.itemName || '').toLowerCase();
+      const location = (item.location || '').toLowerCase();
+      const matchesSearch = !query || itemName.includes(query) || location.includes(query);
       const matchesCategory = selectedCategory === 'All' || item.category === selectedCategory;
       const matchesLowStock = !showLowStockOnly || item.quantity <= item.minQuantity;
       return matchesSearch && matchesCategory && matchesLowStock;
@@ -118,14 +121,16 @@ export default function InventoryManagement() {
 
   // Filter & Search Logic: Expenses
   const filteredExpenses = useMemo(() => {
+    const query = (expenseSearch || '').toLowerCase().trim();
     return expensesList.filter(exp => {
-      const desc = exp.description.toLowerCase();
-      const rec = exp.recordedBy.toLowerCase();
-      const matchesSearch = desc.includes(expenseSearch.toLowerCase()) || rec.includes(expenseSearch.toLowerCase());
+      if (!exp) return false;
+      const desc = (exp.description || '').toLowerCase();
+      const rec = (exp.recordedBy || '').toLowerCase();
+      const matchesSearch = !query || desc.includes(query) || rec.includes(query);
       const matchesCategory = expenseCategoryFilter === 'All' || exp.category === expenseCategoryFilter;
       const matchesPayment = expensePaymentFilter === 'All' || exp.paymentMethod === expensePaymentFilter;
       return matchesSearch && matchesCategory && matchesPayment;
-    }).sort((a, b) => b.date - a.date);
+    }).sort((a, b) => (b.date || 0) - (a.date || 0));
   }, [expensesList, expenseSearch, expenseCategoryFilter, expensePaymentFilter]);
 
   // Aggregate Metrics: Stock Registry

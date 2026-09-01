@@ -523,7 +523,7 @@ export default function EVoting() {
                         />
                       ) : (
                         <div className="w-12 h-12 rounded-full bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 uppercase font-black font-sans shrink-0">
-                          {verifiedStudent.firstName[0]}{verifiedStudent.lastName[0]}
+                          {(verifiedStudent.firstName?.[0] || '')}{(verifiedStudent.lastName?.[0] || '') || 'V'}
                         </div>
                       )}
                       <div>

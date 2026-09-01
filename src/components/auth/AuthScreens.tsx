@@ -1,4 +1,4 @@
-import { useState, FormEvent, useMemo } from 'react';
+import { useState, useEffect, FormEvent, useMemo } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -17,13 +17,17 @@ import {
   Copy, 
   Check, 
   HelpCircle,
-  Sparkles
+  Sparkles,
+  Building2,
+  ChevronDown,
+  Search,
+  School as SchoolIcon
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { db } from '../../db/schema';
+import { db, School } from '../../db/schema';
 import { useNotifications } from '../../contexts/NotificationContext';
-import { authApi } from '../../lib/api';
+import { authApi, schoolsApi } from '../../lib/api';
 
 interface AuthScreensProps {
   onBackToGetStarted?: () => void;
@@ -39,18 +43,51 @@ export function AuthScreens({ onBackToGetStarted }: AuthScreensProps) {
     [settings]
   );
 
-  const { handleLogin, signInWithMagicLink } = useAuth();
+  const { handleLogin, signInWithMagicLink, verifyOtp, setSchoolContext } = useAuth();
   const [authMode, setAuthMode] = useState<AuthMode>('login');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
 
+  // Auto-detection state for multi-school tenancy
+  const [detectedSchool, setDetectedSchool] = useState<any | null>(null);
+
   // Login form state
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
 
+  // Auto-detect school based on input in real-time
+  useEffect(() => {
+    const clean = username.trim().toLowerCase();
+    if (!clean || clean.length < 2) {
+      setDetectedSchool(null);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/auth/resolve-school?input=${encodeURIComponent(clean)}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && data.school) {
+            setDetectedSchool(data.school);
+          } else {
+            setDetectedSchool(null);
+          }
+        }
+      } catch (e) {
+        setDetectedSchool(null);
+      }
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [username]);
+
   // Magic link state
   const [magicEmail, setMagicEmail] = useState('');
+  const [magicTokenInput, setMagicTokenInput] = useState('');
+  const [magicActionUrl, setMagicActionUrl] = useState<string | null>(null);
+  const [magicOtpCode, setMagicOtpCode] = useState<string | null>(null);
 
   // Forgot password form state
   const [forgotInput, setForgotInput] = useState('');
@@ -70,17 +107,20 @@ export function AuthScreens({ onBackToGetStarted }: AuthScreensProps) {
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
 
+  const activeDisplaySchool = detectedSchool || (schoolProfile.schoolName !== 'SCHOOL SPHERE' ? schoolProfile : null);
+
   const handleQuickLogin = async (usr: string, pass: string) => {
     setIsLoading(true);
     setError(null);
     setUsername(usr);
     setPassword(pass);
     try {
-      const result = await handleLogin(usr, pass);
+      const result = await handleLogin(usr, pass, detectedSchool?.id);
       if (!result.success) {
         setError(result.error || 'Invalid username or password');
       } else {
-        showToast(`Welcome back, ${result.user?.fullName || usr}!`, 'success');
+        const schoolName = result.school?.name || (result.school as any)?.schoolName || 'your school';
+        showToast(`Welcome back to ${schoolName}, ${result.user?.fullName || usr}!`, 'success');
       }
     } catch (err: any) {
       setError(err?.message || 'An unexpected error occurred during authentication');
@@ -95,11 +135,12 @@ export function AuthScreens({ onBackToGetStarted }: AuthScreensProps) {
     setError(null);
 
     try {
-      const result = await handleLogin(username, password);
+      const result = await handleLogin(username, password, detectedSchool?.id);
       if (!result.success) {
         setError(result.error || 'Invalid username or password');
       } else {
-        showToast(`Welcome back, ${result.user?.fullName || username}!`, 'success');
+        const schoolName = result.school?.name || (result.school as any)?.schoolName || 'your school';
+        showToast(`Welcome back to ${schoolName}, ${result.user?.fullName || username}!`, 'success');
       }
     } catch (err: any) {
       setError(err?.message || 'An unexpected error occurred during authentication');
@@ -121,6 +162,11 @@ export function AuthScreens({ onBackToGetStarted }: AuthScreensProps) {
     try {
       const resp = await signInWithMagicLink(magicEmail.trim());
       if (resp.success) {
+        if (resp.magicLinkUrl) setMagicActionUrl(resp.magicLinkUrl);
+        if (resp.emailOtpCode) {
+          setMagicOtpCode(resp.emailOtpCode);
+          setMagicTokenInput(resp.emailOtpCode);
+        }
         setAuthMode('magic_sent');
         showToast('Magic login link dispatched via Supabase!', 'success');
       } else {
@@ -128,6 +174,30 @@ export function AuthScreens({ onBackToGetStarted }: AuthScreensProps) {
       }
     } catch (err: any) {
       setError(err?.message || 'Failed to send magic link. Please check network connection.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleVerifyOtpSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!magicTokenInput.trim()) {
+      setError('Please enter the verification code.');
+      return;
+    }
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const resp = await verifyOtp(magicEmail.trim(), magicTokenInput.trim());
+      if (resp.success) {
+        showToast('Email verified and logged in successfully!', 'success');
+      } else {
+        setError(resp.error || 'Invalid or expired OTP code.');
+      }
+    } catch (err: any) {
+      setError(err?.message || 'Verification failed. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -254,26 +324,41 @@ export function AuthScreens({ onBackToGetStarted }: AuthScreensProps) {
           layout
           className="bg-white rounded-3xl shadow-xl shadow-slate-200 border border-slate-100 overflow-hidden w-full max-w-md"
         >
-          <div className="flex border-b border-slate-100 bg-slate-50/50 p-6 items-center gap-4">
-            <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center shadow shadow-indigo-100 border border-slate-100 shrink-0 overflow-hidden p-1.5 bg-slate-50/20">
-              {schoolProfile.logo ? (
-                <img src={schoolProfile.logo} alt={schoolProfile.schoolName} className="w-full h-full object-contain" />
-              ) : (
-                <ShieldCheck className="w-6 h-6 text-indigo-600" />
-              )}
+          {/* Multi-School Context Header */}
+          <div className="flex border-b border-slate-100 bg-slate-50/50 p-5 items-center justify-between gap-3">
+            <div className="flex items-center gap-3.5 min-w-0">
+              <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center shadow-xs border border-slate-100 shrink-0 overflow-hidden p-1.5 bg-slate-50/20">
+                {activeDisplaySchool?.logo || activeDisplaySchool?.logo_url ? (
+                  <img 
+                    src={activeDisplaySchool.logo || activeDisplaySchool.logo_url} 
+                    alt={activeDisplaySchool.name || activeDisplaySchool.schoolName} 
+                    className="w-full h-full object-contain" 
+                  />
+                ) : (
+                  <Building2 className="w-6 h-6 text-indigo-600" />
+                )}
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <h2 className="text-sm font-black text-slate-900 tracking-tight uppercase leading-snug truncate">
+                    {detectedSchool ? (detectedSchool.name || detectedSchool.schoolName) : (schoolProfile.schoolName || 'UNIVERSAL CAMPUS PORTAL')}
+                  </h2>
+                </div>
+                <div className="flex items-center gap-1.5 mt-0.5">
+                  <span className={cn(
+                    "inline-block w-1.5 h-1.5 rounded-full",
+                    detectedSchool ? "bg-emerald-500 animate-pulse" : "bg-indigo-500"
+                  )} />
+                  <p className="text-[9px] font-extrabold text-indigo-600 uppercase tracking-wider truncate">
+                    {detectedSchool ? `Verified Campus • Auto-Detected` : `Auto-Detect My School (Universal)`}
+                  </p>
+                </div>
+              </div>
             </div>
-            <div className="min-w-0">
-              <h2 className="text-sm font-black text-slate-900 tracking-tight uppercase leading-snug truncate">
-                {schoolProfile.schoolName}
-              </h2>
-              <p className="text-[9px] font-extrabold text-indigo-600 uppercase tracking-wider mt-0.5">
-                {authMode === 'login' && "Secure Workspace Portal"}
-                {authMode === 'magic' && "Passwordless Magic Link"}
-                {authMode === 'magic_sent' && "Magic Link Dispatched"}
-                {authMode === 'forgot' && "Account Password Recovery"}
-                {authMode === 'sent' && "Supabase Reset Link Dispatched"}
-                {authMode === 'reset' && "Set New Password"}
-              </p>
+
+            <div className="shrink-0 flex items-center gap-1 px-2.5 py-1 bg-indigo-50 text-indigo-700 rounded-lg text-[9px] font-extrabold uppercase tracking-wider border border-indigo-100/80 shadow-2xs">
+              <Sparkles className="w-3 h-3 text-indigo-600" />
+              <span>Smart Detect</span>
             </div>
           </div>
 
@@ -297,8 +382,26 @@ export function AuthScreens({ onBackToGetStarted }: AuthScreensProps) {
                     </div>
                   )}
 
+                  {/* Auto-detected school banner notification */}
+                  {detectedSchool && (
+                    <motion.div 
+                      initial={{ opacity: 0, y: -4 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="p-2.5 rounded-xl text-xs font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 flex items-center justify-between gap-2"
+                    >
+                      <div className="flex items-center gap-2 truncate">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                        <span className="truncate">Campus: <strong>{detectedSchool.name}</strong></span>
+                      </div>
+                      <span className="text-[10px] uppercase font-black tracking-wider text-emerald-700 shrink-0 bg-emerald-100 px-2 py-0.5 rounded-md">Auto-Detected</span>
+                    </motion.div>
+                  )}
+
                   <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">Username / Email</label>
+                    <div className="flex items-center justify-between ml-1">
+                      <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Username / Email</label>
+                      <span className="text-[10px] text-slate-400 font-medium">Any registered school</span>
+                    </div>
                     <div className="relative group">
                       <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-indigo-500 transition-colors" />
                       <input 
@@ -307,7 +410,7 @@ export function AuthScreens({ onBackToGetStarted }: AuthScreensProps) {
                         value={username}
                         onChange={(e) => setUsername(e.target.value)}
                         className="w-full pl-11 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-indigo-500 focus:bg-white transition-all text-sm font-medium"
-                        placeholder="admin or registered email"
+                        placeholder="e.g. admin or user@school"
                       />
                     </div>
                   </div>
@@ -541,17 +644,69 @@ export function AuthScreens({ onBackToGetStarted }: AuthScreensProps) {
                     </div>
                   </div>
 
-                  <div className="p-3 bg-indigo-50/70 border border-indigo-100 rounded-xl text-left text-[11px] text-indigo-900 space-y-1">
-                    <div className="font-bold flex items-center gap-1.5 text-indigo-700">
-                      <Sparkles className="w-3.5 h-3.5" />
-                      <span>Instant One-Click Login</span>
+                  {/* OTP Token Verification Form */}
+                  <form onSubmit={handleVerifyOtpSubmit} className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-3 text-left">
+                    <label className="text-xs font-bold text-slate-700 block">
+                      Enter Verification Code (OTP)
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={magicTokenInput}
+                        onChange={(e) => setMagicTokenInput(e.target.value)}
+                        placeholder="6-digit code e.g. 123456"
+                        className="flex-1 px-3 py-2.5 bg-white border border-slate-300 rounded-xl text-sm font-bold text-slate-800 tracking-wider text-center focus:border-indigo-500 outline-none"
+                      />
+                      <button
+                        type="submit"
+                        disabled={isLoading || !magicTokenInput.trim()}
+                        className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer"
+                      >
+                        {isLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Verify Code'}
+                      </button>
                     </div>
-                    <p className="text-slate-600 leading-normal">
-                      Click the link in your email inbox to automatically authenticate your session into SchoolSphere without typing a password.
-                    </p>
-                  </div>
+                    {magicOtpCode && (
+                      <p className="text-[10px] text-slate-500 flex items-center gap-1 font-medium">
+                        <Sparkles className="w-3 h-3 text-indigo-500" />
+                        <span>Pre-filled with your generated code: <strong className="text-indigo-700">{magicOtpCode}</strong></span>
+                      </p>
+                    )}
+                  </form>
 
-                  <div className="pt-3 space-y-2">
+                  {/* Direct Action Link for Testing in Preview */}
+                  {magicActionUrl && (
+                    <div className="p-3.5 bg-indigo-50 border border-indigo-200 rounded-2xl text-left space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-indigo-900 flex items-center gap-1">
+                          <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+                          <span>Direct Magic Link (Development Testing)</span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText(magicActionUrl);
+                            setCopiedLink(true);
+                            setTimeout(() => setCopiedLink(false), 2000);
+                          }}
+                          className="text-[10px] font-bold text-indigo-700 hover:text-indigo-900 flex items-center gap-1 bg-white px-2 py-1 rounded-md border border-indigo-200 cursor-pointer"
+                        >
+                          {copiedLink ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                          <span>{copiedLink ? 'Copied' : 'Copy'}</span>
+                        </button>
+                      </div>
+                      <a
+                        href={magicActionUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="w-full py-2 px-3 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 transition-all shadow-xs"
+                      >
+                        <span>Open & Complete Supabase Verification &rarr;</span>
+                        <ExternalLink className="w-3.5 h-3.5" />
+                      </a>
+                    </div>
+                  )}
+
+                  <div className="pt-2 space-y-2">
                     <button
                       onClick={() => handleMagicLinkSubmit({ preventDefault: () => {} } as any)}
                       disabled={isLoading}

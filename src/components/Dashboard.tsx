@@ -969,8 +969,8 @@ export default function Dashboard({ onViewChange }: DashboardProps) {
                         {student.photo ? (
                           <img src={student.photo} alt={student.firstName} className="w-full h-full object-cover" />
                         ) : (
-                          <div className="w-full h-full flex items-center justify-center bg-indigo-50 text-indigo-600 font-bold text-sm">
-                            {student.firstName[0]}
+                          <div className="w-full h-full flex items-center justify-center bg-indigo-50 text-indigo-600 font-bold text-sm uppercase">
+                            {student.firstName?.[0] || 'S'}
                           </div>
                         )}
                       </div>

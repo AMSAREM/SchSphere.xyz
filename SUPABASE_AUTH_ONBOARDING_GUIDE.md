@@ -172,15 +172,24 @@ Complete these 3 configuration steps in your **Supabase Project Dashboard**:
    * `http://localhost:3000` (for local development)
 4. Click **Save**.
 
-### 3. Edge Function Secrets & Send Email Hook (Optional Custom Resend Hook)
-If using the custom `send-magic-link` Edge Function hook:
-1. Go to **Project Settings** → **Edge Functions** → **Secrets**.
-2. Ensure secrets are set:
-   * `RESEND_API_KEY`: Your Resend API key
-   * `SEND_EMAIL_HOOK_SECRET`: The webhook secret generated from the Auth Hooks dashboard
-3. Go to **Authentication** → **Hooks** → **Send Email hook** and set:
-   * Hook type: `HTTPS`
-   * URL: `https://<your-project-ref>.supabase.co/functions/v1/send-magic-link`
+### 3. Edge Function Secrets & Send Email Hook (Custom Resend Hook)
+To customize and brand your Supabase Auth emails with **Resend** and **React Email**:
+1. **Set Edge Function Secrets** in Supabase:
+   * `RESEND_API_KEY`: Your Resend API key (`re_...`)
+   * `SEND_EMAIL_HOOK_SECRET`: The webhook secret generated from the Auth Hooks dashboard (`v1,whsec_...`)
+   * `SUPABASE_URL`: Your Supabase Project URL (`https://<project-ref>.supabase.co`)
+2. **Deploy the Edge Function**:
+   ```bash
+   supabase functions deploy send-email --no-verify-jwt
+   ```
+3. **Configure Supabase Auth Hook**:
+   * Go to **Authentication** → **Hooks** → **Send Email Hook**.
+   * Select **HTTPS** (or Edge Function `send-email`).
+   * Hook URL: `https://<your-project-ref>.supabase.co/functions/v1/send-email`
+   * Copy the webhook secret into `SEND_EMAIL_HOOK_SECRET`.
+   * Click **Save**.
+
+The source code for this hook is located at `/supabase/functions/send-email/index.ts`.
 
 ---
 

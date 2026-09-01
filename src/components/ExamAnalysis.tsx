@@ -687,8 +687,8 @@ export default function ExamAnalysis() {
           </div>
         ) : studentRecord ? (
           <div className="flex items-center gap-2.5 bg-indigo-50/50 border border-indigo-100 rounded-xl p-3 pr-4">
-            <div className="w-9 h-9 bg-indigo-600 text-white rounded-lg flex items-center justify-center font-black text-sm">
-              {studentRecord.firstName[0]}{studentRecord.lastName[0]}
+            <div className="w-9 h-9 bg-indigo-600 text-white rounded-lg flex items-center justify-center font-black text-sm uppercase">
+              {(studentRecord.firstName?.[0] || '')}{(studentRecord.lastName?.[0] || '') || 'S'}
             </div>
             <div>
               <p className="text-xs font-black text-indigo-950">{studentRecord.firstName} {studentRecord.lastName}</p>

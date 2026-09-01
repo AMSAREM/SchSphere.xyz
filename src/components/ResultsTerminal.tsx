@@ -4,11 +4,14 @@ import { db, calculateGrade, type Result, type Student } from '../db/schema';
 import { Save, FileSpreadsheet, Calculator, Search, CheckCircle2, Eye, X, Download, RefreshCcw, FileText, Printer } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useNotifications } from '../contexts/NotificationContext';
+import { calculateFileHash, calculateContentFingerprint, checkIsFileDuplicate, recordImportedFile, validateCsvFile } from '../lib/fileSecurity';
+import { checkRateLimit, useDebounce } from '../lib/rateLimit';
 import * as XLSX from 'xlsx';
 import React from 'react';
 import { exportToPDF, cn, triggerPrint } from '../lib/utils';
 import { ReportCard } from './ReportCard';
 import { useAuth } from '../contexts/AuthContext';
+import { resultsApi, studentsApi } from '../lib/api';
 
 export default function ResultsTerminal() {
   const { showToast } = useNotifications();
@@ -22,8 +25,9 @@ export default function ResultsTerminal() {
     if (isStudent && user?.fullName) {
       const cleanName = user.fullName.replace(/\s*\(Student\)/i, '').trim().toLowerCase();
       return studentsInSystem.find(s => {
-        const full = `${s.firstName} ${s.lastName}`.toLowerCase().trim();
-        return full.includes(cleanName) || cleanName.includes(full);
+        if (!s) return false;
+        const full = `${s.firstName || ''} ${s.lastName || ''}`.toLowerCase().trim();
+        return (cleanName && full.includes(cleanName)) || (full && cleanName.includes(full));
       });
     }
     return null;
@@ -127,10 +131,7 @@ export default function ResultsTerminal() {
     return parentWards.find(w => w.studentId === selectedWardId) || parentWards[0] || null;
   }, [parentWards, selectedWardId]);
 
-  const students = useLiveQuery(
-    () => db.students.where('class').equals(selectedClass).toArray(),
-    [selectedClass]
-  ) || [];
+  const allStudents = useLiveQuery(() => db.students.toArray()) || [];
 
   const myAllResults = useLiveQuery(
     () => {
@@ -162,6 +163,16 @@ export default function ResultsTerminal() {
       .toArray(),
     [selectedClass, selectedSubject, selectedTerm]
   ) || [];
+
+  const students = useMemo(() => {
+    const existingStudentIds = new Set(existingResults.map(r => r.studentId));
+    return allStudents.filter(s => 
+      s.class === selectedClass ||
+      existingStudentIds.has(s.studentId) ||
+      (s.previousClasses && s.previousClasses.includes(selectedClass)) ||
+      (s.classHistory && s.classHistory.some(h => h.class === selectedClass))
+    );
+  }, [allStudents, selectedClass, existingResults]);
 
   const [scores, setScores] = useState<Record<string, { class: number, exam: number }>>({});
   const [isSaving, setIsSaving] = useState(false);
@@ -195,6 +206,8 @@ export default function ResultsTerminal() {
       return;
     }
     setIsSaving(true);
+    const targetSchoolId = user?.school_id || user?.schoolId || (user as any)?.school?.id || '';
+
     const resultsToSave: Result[] = students.map(student => {
       const s = scores[student.studentId] || { class: 0, exam: 0 };
       const total = s.class + s.exam;
@@ -212,56 +225,20 @@ export default function ResultsTerminal() {
       };
     }) || [];
 
-    for (const res of resultsToSave) {
-      const existing = await db.results
-        .where({ studentId: res.studentId, subject: res.subject, term: res.term })
-        .first();
-      
-      if (existing) {
-        await db.results.update(existing.id!, res);
-      } else {
-        await db.results.add(res);
-      }
+    // Rate limit score save actions: Max 3 per 3 seconds
+    const saveCheck = checkRateLimit('results_save_submit', 3, 3000);
+    if (!saveCheck.allowed) {
+      showToast(`Please wait ${saveCheck.retryAfterSeconds}s before saving scores again.`, "error");
+      setIsSaving(false);
+      return;
     }
 
-    showToast("Class examination scores saved to database successfully!", "success");
-    setIsSaving(false);
-    setSavedSuccess(true);
-    setTimeout(() => setSavedSuccess(false), 3000);
-  };
-
-  const importFromExcel = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = async (evt) => {
-      const bstr = evt.target?.result;
-      const wb = XLSX.read(bstr, { type: 'binary' });
-      const wsname = wb.SheetNames[0];
-      const ws = wb.Sheets[wsname];
-      const data = XLSX.utils.sheet_to_json(ws) as any[];
-
-      const newResults: Result[] = data.map(item => {
-        const total = Number(item.classScore || 0) + Number(item.examScore || 0);
-        const { grade, remarks } = calculateGrade(total);
-        return {
-          studentId: String(item.studentId),
-          subject: String(item.subject || selectedSubject),
-          term: String(item.term || selectedTerm),
-          class: String(item.class || selectedClass),
-          classScore: Number(item.classScore || 0),
-          examScore: Number(item.examScore || 0),
-          totalScore: total,
-          grade,
-          remarks
-        };
-      });
-
-      for (const res of newResults) {
+    try {
+      for (const res of resultsToSave) {
         const existing = await db.results
           .where({ studentId: res.studentId, subject: res.subject, term: res.term })
           .first();
+        
         if (existing) {
           await db.results.update(existing.id!, res);
         } else {
@@ -269,8 +246,242 @@ export default function ResultsTerminal() {
         }
       }
 
-      showToast(`${newResults.length} results imported successfully!`, "success");
+      await resultsApi.recordScores(resultsToSave, targetSchoolId);
+      showToast("Class examination scores saved to database successfully!", "success");
+      setSavedSuccess(true);
+      setTimeout(() => setSavedSuccess(false), 3000);
+    } catch (err: any) {
+      console.error("Failed to save results:", err);
+      showToast(err?.message || "Failed to save results to database.", "error");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const importFromCsv = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // 1. Strict File Type Validation: ONLY CSV (.csv) files allowed
+    const validation = await validateCsvFile(file);
+    if (!validation.valid) {
+      showToast(validation.error || "Invalid file format. Only CSV (.csv) files are allowed for import.", "error");
       e.target.value = '';
+      return;
+    }
+
+    // 2. Rate Limit Check on Results File Import
+    const limitCheck = checkRateLimit('results_csv_import', 2, 8000);
+    if (!limitCheck.allowed) {
+      showToast(`Rate limit reached: Please wait ${limitCheck.retryAfterSeconds}s before importing another file.`, "error");
+      e.target.value = '';
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = async (evt) => {
+      try {
+        const bstr = evt.target?.result;
+        const wb = XLSX.read(bstr, { type: 'binary' });
+        const wsname = wb.SheetNames[0];
+        const ws = wb.Sheets[wsname];
+        const data = XLSX.utils.sheet_to_json(ws) as any[];
+
+        if (!data || data.length === 0) {
+          showToast("No data found in the uploaded CSV file.", "error");
+          e.target.value = '';
+          return;
+        }
+
+        // 2. Cryptographic Duplicate File Check
+        const fileHash = await calculateFileHash(file);
+        const contentSig = await calculateContentFingerprint(data);
+        const targetSchoolId = user?.school_id || user?.schoolId || (user as any)?.school?.id || '';
+
+        const dupCheck = await checkIsFileDuplicate(fileHash, contentSig, targetSchoolId, 'results');
+        if (dupCheck.isDuplicate) {
+          showToast(`⛔ Duplicate File Blocked: ${dupCheck.reason || 'This exact results CSV file has already been imported.'}`, "error");
+          e.target.value = '';
+          return;
+        }
+
+        // Helper to extract value case-insensitively from a row across multiple possible header names
+        const getRowVal = (row: any, candidates: string[]): any => {
+          if (!row || typeof row !== 'object') return undefined;
+          const keys = Object.keys(row);
+          for (const candidate of candidates) {
+            if (row[candidate] !== undefined && row[candidate] !== null && String(row[candidate]).trim() !== '') {
+              return row[candidate];
+            }
+            const normalizedCandidate = candidate.toLowerCase().replace(/[^a-z0-9]/g, '');
+            for (const k of keys) {
+              const normalizedKey = k.toLowerCase().replace(/[^a-z0-9]/g, '');
+              if (normalizedKey === normalizedCandidate && row[k] !== undefined && row[k] !== null && String(row[k]).trim() !== '') {
+                return row[k];
+              }
+            }
+          }
+          return undefined;
+        };
+
+        const allExistingStudents = await db.students.toArray();
+        const newResults: Result[] = [];
+        const newScoresMap: Record<string, { class: number, exam: number }> = {};
+
+        for (let i = 0; i < data.length; i++) {
+          const item = data[i];
+          let rawStudentId = getRowVal(item, [
+            'studentId', 'student_id', 'StudentID', 'Student ID', 'ID', 'Id', 'id',
+            'Index No', 'Index Number', 'indexNumber', 'index_no', 'Index', 'index',
+            'Student Number', 'student_number', 'Admission Number', 'admission_number', 'Adm No', 'adm_no'
+          ]);
+          rawStudentId = rawStudentId !== undefined && rawStudentId !== null ? String(rawStudentId).trim() : '';
+          if (rawStudentId.toLowerCase() === 'undefined' || rawStudentId.toLowerCase() === 'null') {
+            rawStudentId = '';
+          }
+
+          let firstName = getRowVal(item, ['firstName', 'first_name', 'FirstName', 'First Name', 'firstname', 'first']);
+          firstName = firstName ? String(firstName).trim() : '';
+
+          let lastName = getRowVal(item, ['lastName', 'last_name', 'LastName', 'Last Name', 'surname', 'Surname', 'lastname', 'last']);
+          lastName = lastName ? String(lastName).trim() : '';
+
+          let fullName = getRowVal(item, ['studentName', 'student_name', 'Student Name', 'StudentName', 'Name', 'name', 'Full Name', 'fullName', 'fullname', 'Candidate Name']);
+          fullName = fullName ? String(fullName).trim() : '';
+
+          if (!firstName && !lastName && fullName) {
+            const parts = fullName.split(/\s+/).filter(Boolean);
+            firstName = parts[0] || '';
+            lastName = parts.slice(1).join(' ') || '';
+          }
+
+          const rowClass = String(getRowVal(item, ['class', 'Class', 'class_name', 'Class Name', 'Grade', 'grade', 'Form', 'form']) || selectedClass).trim();
+
+          // Intelligent Student Lookup: Match by ID, Full Name, or First+Last Name
+          let matchedStudent = allExistingStudents.find(s => {
+            if (rawStudentId && s.studentId && s.studentId.trim().toLowerCase() === rawStudentId.toLowerCase()) {
+              return true;
+            }
+            if (firstName && lastName) {
+              const sFirst = (s.firstName || '').trim().toLowerCase();
+              const sLast = (s.lastName || '').trim().toLowerCase();
+              if (sFirst === firstName.toLowerCase() && sLast === lastName.toLowerCase()) return true;
+              if (sFirst === lastName.toLowerCase() && sLast === firstName.toLowerCase()) return true;
+            }
+            if (fullName) {
+              const sFull = `${s.firstName || ''} ${s.lastName || ''}`.trim().toLowerCase();
+              if (sFull && (sFull === fullName.toLowerCase() || fullName.toLowerCase().includes(sFull))) return true;
+            }
+            return false;
+          });
+
+          let effectiveStudentId = rawStudentId;
+
+          if (matchedStudent) {
+            effectiveStudentId = matchedStudent.studentId;
+          } else {
+            // If student is not found in the student registry, auto-create them with proper names so they never display as "Unknown"
+            if (!effectiveStudentId) {
+              const randomNum = Math.floor(1000 + Math.random() * 9000);
+              effectiveStudentId = `STU-${randomNum}`;
+            }
+            const effectiveFirst = firstName || (fullName ? fullName.split(' ')[0] : `Student ${i + 1}`);
+            const effectiveLast = lastName || (fullName && fullName.includes(' ') ? fullName.split(' ').slice(1).join(' ') : effectiveStudentId);
+
+            const autoStudent: Student = {
+              studentId: effectiveStudentId,
+              firstName: effectiveFirst,
+              lastName: effectiveLast,
+              class: rowClass || selectedClass,
+              gender: 'Male',
+              dateOfBirth: '2010-01-01',
+              guardianName: 'Parent / Guardian',
+              guardianPhone: '0000000000',
+              feesPaid: 0,
+              totalFees: 1500,
+              createdAt: Date.now()
+            };
+
+            await studentsApi.create(autoStudent, targetSchoolId);
+            allExistingStudents.push(autoStudent);
+          }
+
+          // Extract score values
+          const classScoreRaw = getRowVal(item, [
+            'classScore', 'class_score', 'ClassScore', 'Class Score', 'Class Score (30%)', 'Class (30%)',
+            'Class Score(30%)', 'CA', 'CA Score', 'Class Work', 'Continuous Assessment', '30%', 'Score 30', 'ClassMark', 'Class Mark'
+          ]);
+          const examScoreRaw = getRowVal(item, [
+            'examScore', 'exam_score', 'ExamScore', 'Exam Score', 'Exam Score (70%)', 'Exam (70%)',
+            'Exam Score(70%)', 'Exam', 'Exams', 'Examination', 'Exam Mark', '70%', 'Score 70', 'ExamMark'
+          ]);
+
+          const classScore = Math.min(30, Math.max(0, Number(classScoreRaw || 0)));
+          const examScore = Math.min(70, Math.max(0, Number(examScoreRaw || 0)));
+          const total = classScore + examScore;
+          const { grade, remarks } = calculateGrade(total);
+
+          const subject = String(getRowVal(item, ['subject', 'Subject', 'subject_name', 'Subject Name', 'Course', 'course', 'SubjectTitle']) || selectedSubject).trim();
+          const term = String(getRowVal(item, ['term', 'Term', 'academic_term', 'Academic Term', 'Semester', 'semester', 'Current Term']) || selectedTerm).trim();
+
+          const res: Result = {
+            studentId: effectiveStudentId,
+            subject,
+            term,
+            class: rowClass || selectedClass,
+            classScore,
+            examScore,
+            totalScore: total,
+            grade,
+            remarks
+          };
+
+          newResults.push(res);
+
+          // Track for immediate local UI state update
+          if (subject.toLowerCase() === selectedSubject.toLowerCase() && term.toLowerCase() === selectedTerm.toLowerCase()) {
+            newScoresMap[effectiveStudentId] = { class: classScore, exam: examScore };
+          }
+        }
+
+        // Save results to local Dexie and sync with cloud database
+        for (const res of newResults) {
+          const existing = await db.results
+            .where({ studentId: res.studentId, subject: res.subject, term: res.term })
+            .first();
+          if (existing) {
+            await db.results.update(existing.id!, res);
+          } else {
+            await db.results.add(res);
+          }
+        }
+
+        await resultsApi.recordScores(newResults, targetSchoolId);
+
+        // Update active scores in component memory
+        if (Object.keys(newScoresMap).length > 0) {
+          setScores(prev => ({ ...prev, ...newScoresMap }));
+        }
+
+        // Record file hash in registry for audit trail
+        await recordImportedFile({
+          hash: fileHash,
+          fileName: file.name,
+          fileSize: file.size,
+          rowCount: newResults.length,
+          schoolId: targetSchoolId,
+          module: 'results',
+          importedAt: Date.now(),
+          importedBy: user?.username || user?.fullName || 'Admin'
+        });
+
+        showToast(`Successfully imported ${newResults.length} student result(s) without unknown entries!`, "success");
+      } catch (err: any) {
+        console.error("Results import error:", err);
+        showToast(err?.message || "Failed to process results CSV file.", "error");
+      } finally {
+        e.target.value = '';
+      }
     };
     reader.readAsBinaryString(file);
   };
@@ -326,14 +537,18 @@ export default function ResultsTerminal() {
     const ws = XLSX.utils.json_to_sheet(templateData);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Exam_Results_Template");
-    XLSX.writeFile(wb, `${selectedClass}_${selectedSubject}_Template.xlsx`);
+    XLSX.writeFile(wb, `${selectedClass}_${selectedSubject}_Template.csv`, { bookType: 'csv' });
   };
 
-  const filteredStudents = students?.filter(s => 
-    s.firstName.toLowerCase().includes(search.toLowerCase()) ||
-    s.lastName.toLowerCase().includes(search.toLowerCase()) ||
-    s.studentId.toLowerCase().includes(search.toLowerCase())
-  );
+  const filteredStudents = students?.filter(s => {
+    if (!s) return false;
+    const query = (search || '').toLowerCase().trim();
+    if (!query) return true;
+    const firstName = (s.firstName || '').toLowerCase();
+    const lastName = (s.lastName || '').toLowerCase();
+    const studentId = (s.studentId || '').toLowerCase();
+    return firstName.includes(query) || lastName.includes(query) || studentId.includes(query) || `${firstName} ${lastName}`.includes(query);
+  });
 
   if (user?.role === 'parent') {
     if (parentWards.length === 0) {
@@ -823,26 +1038,26 @@ export default function ResultsTerminal() {
           <div className="col-span-2 md:col-span-3 lg:w-auto flex flex-wrap items-center gap-2 sm:gap-3 lg:ml-auto">
             <input 
               type="file" 
-              id="import-results" 
+              id="import-results-csv" 
               className="hidden" 
-              accept=".xlsx, .xls"
-              onChange={importFromExcel}
+              accept=".csv, text/csv"
+              onChange={importFromCsv}
             />
             <button 
               onClick={downloadTemplate}
               className="flex-1 lg:flex-none bg-white text-slate-700 border border-slate-200 px-4 py-2 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-slate-50 transition-all h-10 text-sm"
-              title="Download Excel Template"
+              title="Download CSV Results Template"
             >
-              <FileSpreadsheet className="w-4 h-4" />
-              <span className="hidden sm:inline">Template</span>
+              <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+              <span className="hidden sm:inline">CSV Template</span>
             </button>
             <button 
-              onClick={() => document.getElementById('import-results')?.click()}
+              onClick={() => document.getElementById('import-results-csv')?.click()}
               className="flex-1 lg:flex-none bg-white text-slate-700 border border-slate-200 px-4 py-2 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-slate-50 transition-all h-10 text-sm"
-              title="Import from Excel"
+              title="Import CSV Results File Only"
             >
-              <Download className="w-4 h-4" />
-              <span className="hidden sm:inline">Import</span>
+              <Download className="w-4 h-4 text-indigo-600" />
+              <span className="hidden sm:inline">Import CSV</span>
             </button>
             <button 
               onClick={handleBulkSave}

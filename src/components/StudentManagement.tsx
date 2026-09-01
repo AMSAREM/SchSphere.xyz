@@ -1,16 +1,20 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { db, type Student, useFeeTypes, type PromotionRecord } from '../db/schema';
-import { Plus, Search, Filter, Download, MoreVertical, Edit2, Trash2, Users, FileSpreadsheet, Camera, User, Printer, Eye, CreditCard, TrendingUp, ArrowRight, Check, History, Undo2, AlertTriangle } from 'lucide-react';
+import { db, type Student, useFeeTypes, type PromotionRecord, type ClassHistoryRecord, normalizeStudentRecord, getStudentFullName, autoRepairStudentsInDb } from '../db/schema';
+import { Plus, Search, Filter, Download, MoreVertical, Edit2, Trash2, Users, FileSpreadsheet, Camera, User, Printer, Eye, CreditCard, TrendingUp, ArrowRight, Check, History, Undo2, AlertTriangle, ShieldCheck, ShieldAlert, CheckSquare, Square, X, Calendar, GraduationCap, BookOpen, Award, RefreshCw, UploadCloud, Database } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { formatCurrency, cn, triggerPrint, exportToPDF } from '../lib/utils';
 import { useAuth } from '../contexts/AuthContext';
 import { useNotifications } from '../contexts/NotificationContext';
+import { studentsApi, promotionsApi } from '../lib/api';
+import { getCurrentSchoolId } from '../lib/supabase';
+import { calculateFileHash, calculateContentFingerprint, checkIsFileDuplicate, recordImportedFile, filterDuplicateStudentRows, validateCsvFile } from '../lib/fileSecurity';
+import { checkRateLimit, useDebounce } from '../lib/rateLimit';
 import * as XLSX from 'xlsx';
 import React from 'react';
 
 export default function StudentManagement() {
-  const { user: currentUser } = useAuth();
+  const { user: currentUser, school: activeSchool } = useAuth();
   const { showToast, confirm } = useNotifications();
   const feeTypes = useFeeTypes();
   const isAdmin = currentUser?.role === 'admin' || currentUser?.role === 'super_admin' || currentUser?.role === 'headteacher';
@@ -21,8 +25,20 @@ export default function StudentManagement() {
   const [searchTerm, setSearchTerm] = useState('');
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
+
+  // Multi-Selection and Bulk Deletion States
+  const [selectedStudentIds, setSelectedStudentIds] = useState<number[]>([]);
+  const [isBulkDeleting, setIsBulkDeleting] = useState(false);
+
+  // Backend Sync / Migration States (Option C & Option B)
+  const [isBackendSyncing, setIsBackendSyncing] = useState(false);
+  const [isBackendPushing, setIsBackendPushing] = useState(false);
+  const [lastSyncStatus, setLastSyncStatus] = useState<string | null>(null);
 
   const [selectedProfileStudent, setSelectedProfileStudent] = useState<Student | null>(null);
+  const [profileModalTab, setProfileModalTab] = useState<'details' | 'progression' | 'results'>('details');
   const [selectedPaymentStudent, setSelectedPaymentStudent] = useState<Student | null>(null);
   const [paymentAmount, setPaymentAmount] = useState('');
   const [isReceiptModalOpen, setIsReceiptModalOpen] = useState(false);
@@ -33,7 +49,7 @@ export default function StudentManagement() {
   const [promoSourceClass, setPromoSourceClass] = useState<string>('');
   const [promoDestClass, setPromoDestClass] = useState<string>('');
   const [promoSelectedStudentIds, setPromoSelectedStudentIds] = useState<number[]>([]);
-  const [promoResetFees, setPromoResetFees] = useState(true);
+  const [promoResetFees, setPromoResetFees] = useState(false);
   const [promoApplyNewDefaults, setPromoApplyNewDefaults] = useState(true);
   const [promoRolloverYear, setPromoRolloverYear] = useState(false);
   const [promoNextYearVal, setPromoNextYearVal] = useState('');
@@ -43,21 +59,111 @@ export default function StudentManagement() {
   const [promoSearchTerm, setPromoSearchTerm] = useState('');
   const [promoYearFilter, setPromoYearFilter] = useState('');
 
+  // Debounced input search terms to rate-limit intensive rendering/re-filtering
+  const debouncedSearchTerm = useDebounce(searchTerm, 200);
+  const debouncedPromoSearch = useDebounce(promoSearchTerm, 200);
+
+  // Option C: Backend-First Sync
+  const refreshFromBackend = async (showFeedback = true) => {
+    setIsBackendSyncing(true);
+    try {
+      const targetSchoolId = activeSchool?.id || currentUser?.schoolId;
+      const remoteStudents = await studentsApi.getAll(targetSchoolId, true);
+      if (showFeedback) {
+        showToast(`Backend sync complete: ${remoteStudents?.length || 0} student records verified from server database.`, "success");
+      }
+      setLastSyncStatus(`Synced (${remoteStudents?.length || 0} students)`);
+    } catch (err: any) {
+      console.warn("Backend student fetch notice:", err);
+      if (showFeedback) {
+        showToast("Backend fetch notice: local records active.", "info");
+      }
+    } finally {
+      setIsBackendSyncing(false);
+    }
+  };
+
+  // Option B: Push All Local Records to Backend
+  const pushAllLocalToBackend = async () => {
+    setIsBackendPushing(true);
+    try {
+      const targetSchoolId = activeSchool?.id || currentUser?.schoolId;
+      await studentsApi.syncLocalToRemote(targetSchoolId);
+      showToast("All student & school records successfully pushed to backend database!", "success");
+      await refreshFromBackend(false);
+    } catch (err: any) {
+      console.error("Database push error:", err);
+      showToast(err?.message || "Failed to push local records to database.", "error");
+    } finally {
+      setIsBackendPushing(false);
+    }
+  };
+
+  React.useEffect(() => {
+    autoRepairStudentsInDb().then(() => {
+      refreshFromBackend(false);
+    });
+  }, [activeSchool?.id, currentUser?.schoolId]);
+
   const handleQuickPayment = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    // Input Rate Limit: Max 3 payment submissions per 3 seconds
+    const limitCheck = checkRateLimit('quick_payment_submit', 3, 3000);
+    if (!limitCheck.allowed) {
+      showToast(`Rate limit reached. Please wait ${limitCheck.retryAfterSeconds}s before submitting another payment.`, "error");
+      return;
+    }
+
     const amount = Number(paymentAmount);
     if (isNaN(amount) || amount <= 0 || !selectedPaymentStudent || !selectedPaymentStudent.id) return;
     
-    await db.students.update(selectedPaymentStudent.id, {
-      feesPaid: (selectedPaymentStudent.feesPaid || 0) + amount
-    });
-    setLastPayment({ amount, date: Date.now() });
-    setPaymentAmount('');
-    setSelectedPaymentStudent(null);
-    setIsReceiptModalOpen(true);
+    const targetSchoolId = activeSchool?.id || currentUser?.schoolId;
+    const newPaidAmount = (selectedPaymentStudent.feesPaid || 0) + amount;
+
+    try {
+      await studentsApi.update(selectedPaymentStudent.id, {
+        feesPaid: newPaidAmount
+      }, targetSchoolId);
+      
+      setLastPayment({ amount, date: Date.now() });
+      setPaymentAmount('');
+      setSelectedPaymentStudent(null);
+      setIsReceiptModalOpen(true);
+      showToast(`Payment of GHS ${amount.toLocaleString()} processed and synced to Supabase database!`, "success");
+    } catch (err: any) {
+      console.error("Payment submission error:", err);
+      showToast(err?.message || "Failed to record payment in database.", "error");
+    }
   };
   
-  const allStudents = useLiveQuery(() => db.students.toArray());
+  const rawStudents = useLiveQuery(() => db.students.toArray());
+  const allStudents = React.useMemo(() => {
+    return (rawStudents || []).map(s => normalizeStudentRecord(s));
+  }, [rawStudents]);
+
+  const profileStudentResults = useLiveQuery(
+    () => selectedProfileStudent ? db.results.where('studentId').equals(selectedProfileStudent.studentId).toArray() : Promise.resolve([]),
+    [selectedProfileStudent?.studentId]
+  ) || [];
+
+  const profileStudentPromotions = useLiveQuery(
+    async () => {
+      if (!selectedProfileStudent) return [];
+      try {
+        const hasIdx = db.promotionHistory?.schema?.indexes?.some(idx => idx.name === 'studentIdentifier');
+        if (hasIdx) {
+          return await db.promotionHistory.where('studentIdentifier').equals(selectedProfileStudent.studentId).toArray();
+        }
+        const all = await db.promotionHistory.toArray();
+        return all.filter(r => r.studentIdentifier === selectedProfileStudent.studentId || (selectedProfileStudent.id && r.studentId === selectedProfileStudent.id));
+      } catch {
+        const all = await db.promotionHistory.toArray();
+        return all.filter(r => r.studentIdentifier === selectedProfileStudent.studentId || (selectedProfileStudent.id && r.studentId === selectedProfileStudent.id));
+      }
+    },
+    [selectedProfileStudent?.studentId, selectedProfileStudent?.id]
+  ) || [];
 
   const promoSourceStudents = React.useMemo(() => {
     if (!allStudents || !promoSourceClass) return [];
@@ -107,6 +213,14 @@ export default function StudentManagement() {
 
   const handlePromotionSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    // Input Rate Limit: Max 2 promotion operations per 5 seconds
+    const limitCheck = checkRateLimit('promotion_submit', 2, 5000);
+    if (!limitCheck.allowed) {
+      showToast(`Please wait ${limitCheck.retryAfterSeconds}s before initiating another promotion batch.`, "error");
+      return;
+    }
+
     if (!promoSourceClass || !promoDestClass) {
       showToast("Please select both source and destination classes.", "error");
       return;
@@ -122,12 +236,29 @@ export default function StudentManagement() {
 
     try {
       let count = 0;
+      const targetSchoolId = activeSchool?.id || currentUser?.schoolId;
+
       for (const studentId of promoSelectedStudentIds) {
         const student = allStudents?.find(s => s.id === studentId);
         if (!student) continue;
 
+        // Preserve previous class history entry so historical data is NEVER deleted
+        const previousHistory = student.classHistory || [];
+        const historyEntry: ClassHistoryRecord = {
+          academicYear: academicConfig.academicYear || '2025/2026',
+          term: academicConfig.currentTerm || 'Term 3',
+          class: student.class,
+          totalFees: student.totalFees || 0,
+          feesPaid: student.feesPaid || 0,
+          feeBreakdown: student.feeBreakdown,
+          feePaidBreakdown: student.feePaidBreakdown,
+          promotedAt: Date.now()
+        };
+
         const updateData: Partial<Student> = {
-          class: promoDestClass
+          class: promoDestClass,
+          classHistory: [...previousHistory, historyEntry],
+          previousClasses: Array.from(new Set([...(student.previousClasses || []), student.class]))
         };
 
         if (promoResetFees) {
@@ -148,8 +279,8 @@ export default function StudentManagement() {
           updateData.totalFees = Object.values(initialBreakdown).reduce((a, b) => a + b, 0);
         }
 
-        // Record the promotion history for audit and complete reversibility
-        await db.promotionHistory.add({
+        // Record the promotion history in both Dexie & Supabase for audit and complete reversibility
+        await promotionsApi.recordPromotion({
           studentId: studentId,
           studentIdentifier: student.studentId,
           studentName: `${student.firstName} ${student.lastName}`,
@@ -162,9 +293,9 @@ export default function StudentManagement() {
           previousTotalFees: student.totalFees || 0,
           previousFeeBreakdown: student.feeBreakdown,
           previousFeePaidBreakdown: student.feePaidBreakdown
-        });
+        }, targetSchoolId);
 
-        await db.students.update(studentId, updateData);
+        await studentsApi.update(studentId, updateData, targetSchoolId);
         count++;
       }
 
@@ -178,10 +309,10 @@ export default function StudentManagement() {
             currentTerm: 'Term 1'
           }
         });
-        showToast(`School academic year updated to ${promoNextYearVal} (Term 1)`, "info");
+        showToast(`School academic year rolled over to ${promoNextYearVal} (Term 1)`, "info");
       }
 
-      showToast(`Successfully promoted ${count} students to ${promoDestClass}!`, "success");
+      showToast(`Successfully moved ${count} students to ${promoDestClass}! All previous class records and exam results are safely preserved.`, "success");
       setIsPromotionModalOpen(false);
       setPromoSourceClass('');
       setPromoDestClass('');
@@ -196,6 +327,7 @@ export default function StudentManagement() {
 
   const handleRevertPromotion = async (record: PromotionRecord) => {
     if (!record.id) return;
+    const targetSchoolId = activeSchool?.id || currentUser?.schoolId;
     
     confirm({
       title: "Revert Student Promotion",
@@ -209,17 +341,23 @@ export default function StudentManagement() {
             return;
           }
 
+          // Remove the specific entry from classHistory
+          const updatedHistory = (student.classHistory || []).filter(
+            h => !(h.class === record.sourceClass && h.academicYear === record.academicYear)
+          );
+
           // Fully restore the student parameters
-          await db.students.update(record.studentId, {
+          await studentsApi.update(record.studentId, {
             class: record.sourceClass,
             feesPaid: record.previousFeesPaid,
             totalFees: record.previousTotalFees,
             feeBreakdown: record.previousFeeBreakdown,
-            feePaidBreakdown: record.previousFeePaidBreakdown
-          });
+            feePaidBreakdown: record.previousFeePaidBreakdown,
+            classHistory: updatedHistory
+          }, targetSchoolId);
 
-          // Delete the log entry
-          await db.promotionHistory.delete(record.id!);
+          // Delete the log entry from Dexie and Supabase
+          await promotionsApi.revertPromotion(record.id!, targetSchoolId);
           showToast(`Successfully reverted promotion for ${record.studentName}!`, "success");
         } catch (err) {
           console.error(err);
@@ -231,31 +369,45 @@ export default function StudentManagement() {
 
   const filteredStudents = React.useMemo(() => {
     if (!allStudents) return [];
+    const search = (debouncedSearchTerm || '').toLowerCase().trim();
     return allStudents.filter(s => {
-      const matchesSearch = 
-        s.firstName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        s.lastName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        s.studentId.toLowerCase().includes(searchTerm.toLowerCase());
+      if (!s) return false;
+      const firstName = (s.firstName || '').toLowerCase();
+      const lastName = (s.lastName || '').toLowerCase();
+      const studentId = (s.studentId || '').toLowerCase();
+      
+      const matchesSearch = !search ||
+        firstName.includes(search) ||
+        lastName.includes(search) ||
+        studentId.includes(search) ||
+        `${firstName} ${lastName}`.includes(search);
       
       const matchesFilter = !activeFilter || s.class === activeFilter;
       
       return matchesSearch && matchesFilter;
     });
-  }, [allStudents, searchTerm, activeFilter]);
+  }, [allStudents, debouncedSearchTerm, activeFilter]);
 
   const filteredPromoHistory = React.useMemo(() => {
     if (!promotionHistory) return [];
+    const search = (debouncedPromoSearch || '').toLowerCase().trim();
     return promotionHistory.filter(record => {
-      const matchesSearch = 
-        record.studentName.toLowerCase().includes(promoSearchTerm.toLowerCase()) ||
-        record.studentIdentifier.toLowerCase().includes(promoSearchTerm.toLowerCase()) ||
-        record.sourceClass.toLowerCase().includes(promoSearchTerm.toLowerCase()) ||
-        record.destClass.toLowerCase().includes(promoSearchTerm.toLowerCase());
+      if (!record) return false;
+      const studentName = (record.studentName || '').toLowerCase();
+      const studentIdentifier = (record.studentIdentifier || '').toLowerCase();
+      const sourceClass = (record.sourceClass || '').toLowerCase();
+      const destClass = (record.destClass || '').toLowerCase();
+
+      const matchesSearch = !search ||
+        studentName.includes(search) ||
+        studentIdentifier.includes(search) ||
+        sourceClass.includes(search) ||
+        destClass.includes(search);
       
       const matchesYear = promoYearFilter ? record.academicYear === promoYearFilter : true;
       return matchesSearch && matchesYear;
-    }).sort((a, b) => b.timestamp - a.timestamp); // Sort by newest transition first
-  }, [promotionHistory, promoSearchTerm, promoYearFilter]);
+    }).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)); // Sort by newest transition first
+  }, [promotionHistory, debouncedPromoSearch, promoYearFilter]);
 
   const uniquePromoYears = React.useMemo(() => {
     if (!promotionHistory) return [];
@@ -264,10 +416,17 @@ export default function StudentManagement() {
   }, [promotionHistory]);
 
   const exportToExcel = () => {
-    const ws = XLSX.utils.json_to_sheet(allStudents || []);
+    const dataToExport = filteredStudents && filteredStudents.length > 0 ? filteredStudents : (allStudents || []);
+    if (dataToExport.length === 0) {
+      showToast("No student records available to export.", "info");
+      return;
+    }
+    const ws = XLSX.utils.json_to_sheet(dataToExport);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Students");
-    XLSX.writeFile(wb, "Student_List.xlsx");
+    const filename = `Student_List_${activeFilter ? activeFilter.replace(/\s+/g, '_') : 'All'}_${new Date().toISOString().split('T')[0]}.xlsx`;
+    XLSX.writeFile(wb, filename);
+    showToast(`Successfully exported ${dataToExport.length} student record(s) to Excel!`, "success");
   };
 
   const downloadTemplate = () => {
@@ -297,41 +456,170 @@ export default function StudentManagement() {
     const ws = XLSX.utils.json_to_sheet(templateData);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Student_Template");
-    XLSX.writeFile(wb, "Student_Import_Template.xlsx");
+    XLSX.writeFile(wb, "Student_Import_Template.csv", { bookType: "csv" });
   };
 
-  const importFromExcel = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const parseExcelDate = (val: any): string => {
+    if (!val) return '2015-01-01';
+    if (typeof val === 'number') {
+      try {
+        const utc_days = Math.floor(val - 25569);
+        const utc_value = utc_days * 86400;
+        const date_info = new Date(utc_value * 1000);
+        if (!isNaN(date_info.getTime())) {
+          return date_info.toISOString().split('T')[0];
+        }
+      } catch (e) {}
+    }
+    if (val instanceof Date && !isNaN(val.getTime())) {
+      return val.toISOString().split('T')[0];
+    }
+    if (typeof val === 'string') {
+      const trimmed = val.trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+      const dMatch = trimmed.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+      if (dMatch) {
+        const part1 = parseInt(dMatch[1]);
+        const part2 = parseInt(dMatch[2]);
+        const year = dMatch[3];
+        if (part1 > 12) {
+          return `${year}-${String(part2).padStart(2, '0')}-${String(part1).padStart(2, '0')}`;
+        } else {
+          return `${year}-${String(part1).padStart(2, '0')}-${String(part2).padStart(2, '0')}`;
+        }
+      }
+      const d = new Date(trimmed);
+      if (!isNaN(d.getTime())) return d.toISOString().split('T')[0];
+    }
+    return '2015-01-01';
+  };
+
+  const importFromCsv = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    // 1. Strict File Type Validation: ONLY CSV (.csv) files allowed
+    const validation = await validateCsvFile(file);
+    if (!validation.valid) {
+      showToast(validation.error || "Invalid file format. Only CSV (.csv) files are allowed for import.", "error");
+      e.target.value = '';
+      return;
+    }
+
+    // 2. Rate Limit on File Import: Max 2 import operations per 8 seconds
+    const importRateLimit = checkRateLimit('student_csv_import', 2, 8000);
+    if (!importRateLimit.allowed) {
+      showToast(`Rate limit reached: Please wait ${importRateLimit.retryAfterSeconds} second(s) before importing another file.`, "error");
+      e.target.value = '';
+      return;
+    }
+
+    setIsImporting(true);
+    showToast("Analyzing CSV checksum & verifying against duplicate imports...", "info");
+
     const reader = new FileReader();
     reader.onload = async (evt) => {
-      const bstr = evt.target?.result;
-      const wb = XLSX.read(bstr, { type: 'binary' });
-      const wsname = wb.SheetNames[0];
-      const ws = wb.Sheets[wsname];
-      const data = XLSX.utils.sheet_to_json(ws) as any[];
+      try {
+        const bstr = evt.target?.result;
+        const wb = XLSX.read(bstr, { type: 'binary', cellDates: true });
+        const wsname = wb.SheetNames[0];
+        const ws = wb.Sheets[wsname];
+        const rawData = XLSX.utils.sheet_to_json(ws) as any[];
 
-      const newStudents: Student[] = data.map(item => ({
-        studentId: item.studentId || `STU-${Date.now().toString().slice(-6)}-${Math.floor(Math.random() * 100)}`,
-        firstName: item.firstName || '',
-        lastName: item.lastName || '',
-        class: item.class || 'P1',
-        dateOfBirth: item.dateOfBirth || '',
-        gender: (item.gender === 'Female' ? 'Female' : 'Male'),
-        guardianName: item.guardianName || '',
-        guardianPhone: String(item.guardianPhone || ''),
-        house: item.house || '',
-        department: item.department || '',
-        feesPaid: Number(item.feesPaid || 0),
-        totalFees: Number(item.totalFees || 0),
-        createdAt: Date.now()
-      }));
+        if (!rawData || rawData.length === 0) {
+          showToast("No data found in the uploaded CSV file.", "error");
+          setIsImporting(false);
+          e.target.value = '';
+          return;
+        }
 
-      await db.students.bulkAdd(newStudents);
-      showToast(`${newStudents.length} students imported successfully!`, "success");
+        const targetSchoolId = 
+          currentUser?.school_id || 
+          currentUser?.schoolId || 
+          (currentUser as any)?.school?.id || 
+          activeSchool?.id || 
+          (await getCurrentSchoolId()) || 
+          undefined;
+
+        // 2. Cryptographic Security Check: Compute SHA-256 Checksum of the file
+        const fileHash = await calculateFileHash(file);
+        const contentSig = await calculateContentFingerprint(rawData);
+
+        // 3. Check if file or content signature has already been imported
+        const dupCheck = await checkIsFileDuplicate(fileHash, contentSig, targetSchoolId, 'students');
+        if (dupCheck.isDuplicate) {
+          showToast(
+            `⛔ Duplicate File Blocked: ${dupCheck.reason || 'This exact file has already been imported.'} To protect school data, duplicate file imports are strictly blocked.`,
+            "error"
+          );
+          setIsImporting(false);
+          e.target.value = '';
+          return;
+        }
+
+        const newStudents: Student[] = rawData.map((item, index) => {
+          const customId = item.studentId || item.student_id || item['Student ID'] || item['student ID'] || item['ID'] || `STU-${Date.now().toString().slice(-6)}-${index + 1}`;
+          const dob = parseExcelDate(item.dateOfBirth || item.date_of_birth || item['Date of Birth'] || item['DOB'] || item['Birth Date']);
+
+          return normalizeStudentRecord({
+            ...item,
+            studentId: String(customId).trim(),
+            dateOfBirth: dob,
+            school_id: targetSchoolId,
+            schoolId: targetSchoolId,
+            createdAt: Date.now() + index
+          });
+        });
+
+        // 4. Duplicate Record Filtering against existing school database
+        const { uniqueStudents, duplicateCount } = filterDuplicateStudentRows(newStudents, allStudents || []);
+        
+        if (uniqueStudents.length === 0) {
+          showToast(`⛔ All ${newStudents.length} student records in this file already exist in your school database. Import cancelled to avoid duplicates.`, "error");
+          setIsImporting(false);
+          e.target.value = '';
+          return;
+        }
+
+        // 5. Ingest into Supabase via API with file security signature
+        await studentsApi.bulkCreate(uniqueStudents, targetSchoolId, {
+          fileHash,
+          fileName: file.name
+        });
+
+        // 6. Record file signature in anti-duplicate registry
+        await recordImportedFile({
+          hash: fileHash,
+          fileName: file.name,
+          fileSize: file.size,
+          rowCount: uniqueStudents.length,
+          schoolId: targetSchoolId,
+          module: 'students',
+          importedAt: Date.now(),
+          importedBy: currentUser?.username || currentUser?.fullName || 'Admin'
+        });
+
+        if (duplicateCount > 0) {
+          showToast(`Successfully imported ${uniqueStudents.length} new students (${duplicateCount} duplicate records skipped)!`, "success");
+        } else {
+          showToast(`Successfully imported ${uniqueStudents.length} students into Supabase! Checksum verified.`, "success");
+        }
+      } catch (err: any) {
+        console.error("Error importing students:", err);
+        const errMsg = err?.message || "Error parsing file. Please ensure valid Excel format.";
+        showToast(errMsg, "error");
+      } finally {
+        setIsImporting(false);
+        e.target.value = '';
+      }
+    };
+
+    reader.onerror = () => {
+      showToast("Failed to read the file.", "error");
+      setIsImporting(false);
       e.target.value = '';
     };
+
     reader.readAsBinaryString(file);
   };
 
@@ -384,56 +672,168 @@ export default function StudentManagement() {
 
   const handleStudentSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    const formData = new FormData(e.currentTarget);
-    const studentData = {
-      firstName: formData.get('firstName') as string,
-      lastName: formData.get('lastName') as string,
-      class: formData.get('class') as string,
-      dateOfBirth: formData.get('dob') as string,
-      gender: formData.get('gender') as 'Male' | 'Female',
-      guardianName: formData.get('guardianName') as string,
-      guardianPhone: formData.get('guardianPhone') as string,
-      house: formData.get('house') as string,
-      department: formData.get('department') as string,
-      totalFees: computedTotalFees,
-      feesPaid: modalFeesPaid,
-      feeBreakdown: feeInputs,
-      photo: photoPreview || undefined
-    };
+    if (isSubmitting) return;
 
-    if (editingStudent) {
-      await db.students.update(editingStudent.id!, studentData);
-    } else {
-      const initialPaidBreakdown: Record<string, number> = {};
-      feeTypes.forEach(ft => {
-        initialPaidBreakdown[ft.id] = ft.id === 'tuition' ? modalFeesPaid : 0;
-      });
-      const student: Student = {
-        ...studentData,
-        feePaidBreakdown: initialPaidBreakdown,
-        studentId: `STU-${Date.now().toString().slice(-6)}`,
-        createdAt: Date.now()
-      };
-      await db.students.add(student);
+    // Rate limit student creation/edits: Max 4 submissions per 3 seconds
+    const limitCheck = checkRateLimit('student_form_submit', 4, 3000);
+    if (!limitCheck.allowed) {
+      showToast(`Rate limit: Please wait ${limitCheck.retryAfterSeconds}s before submitting again.`, "error");
+      return;
     }
-    
-    setIsAddModalOpen(false);
-    setEditingStudent(null);
-    setPhotoPreview(null);
+
+    setIsSubmitting(true);
+
+    try {
+      const formData = new FormData(e.currentTarget);
+      const targetSchoolId = 
+        currentUser?.school_id || 
+        currentUser?.schoolId || 
+        (currentUser as any)?.school?.id || 
+        activeSchool?.id || 
+        (await getCurrentSchoolId()) || 
+        undefined;
+
+      const studentData = {
+        firstName: formData.get('firstName') as string,
+        lastName: formData.get('lastName') as string,
+        class: formData.get('class') as string,
+        dateOfBirth: formData.get('dob') as string,
+        gender: formData.get('gender') as 'Male' | 'Female',
+        guardianName: formData.get('guardianName') as string,
+        guardianPhone: formData.get('guardianPhone') as string,
+        house: formData.get('house') as string,
+        department: formData.get('department') as string,
+        totalFees: computedTotalFees,
+        feesPaid: modalFeesPaid,
+        feeBreakdown: feeInputs,
+        photo: photoPreview || undefined,
+        school_id: targetSchoolId,
+        schoolId: targetSchoolId
+      };
+
+      if (editingStudent) {
+        await studentsApi.update(editingStudent.id!, studentData, targetSchoolId);
+        showToast("Student details updated and synced to Supabase!", "success");
+      } else {
+        const initialPaidBreakdown: Record<string, number> = {};
+        feeTypes.forEach(ft => {
+          initialPaidBreakdown[ft.id] = ft.id === 'tuition' ? modalFeesPaid : 0;
+        });
+        const student: Student = {
+          ...studentData,
+          feePaidBreakdown: initialPaidBreakdown,
+          studentId: `STU-${Date.now().toString().slice(-6)}`,
+          createdAt: Date.now()
+        };
+        await studentsApi.create(student, targetSchoolId);
+        showToast("Student registered and stored in Supabase with aligned school!", "success");
+      }
+      
+      setIsAddModalOpen(false);
+      setEditingStudent(null);
+      setPhotoPreview(null);
+    } catch (err: any) {
+      console.error("Error submitting student:", err);
+      showToast("Error saving student to Supabase. Saved locally.", "info");
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
-  const deleteStudent = async (id?: number) => {
+  const handleToggleSelect = (id?: number) => {
     if (!id) return;
+    setSelectedStudentIds(prev => 
+      prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]
+    );
+  };
+
+  const handleSelectAll = () => {
+    if (!filteredStudents) return;
+    const allFilteredIds = filteredStudents.map(s => s.id).filter((id): id is number => id !== undefined);
+    const areAllSelected = allFilteredIds.length > 0 && allFilteredIds.every(id => selectedStudentIds.includes(id));
+
+    if (areAllSelected) {
+      // Unselect all currently filtered
+      setSelectedStudentIds(prev => prev.filter(id => !allFilteredIds.includes(id)));
+    } else {
+      // Select all currently filtered (union)
+      setSelectedStudentIds(prev => Array.from(new Set([...prev, ...allFilteredIds])));
+    }
+  };
+
+  const handleClearSelection = () => {
+    setSelectedStudentIds([]);
+  };
+
+  const exportSelectedToCsv = () => {
+    const selectedData = (allStudents || []).filter(s => s.id && selectedStudentIds.includes(s.id));
+    if (selectedData.length === 0) {
+      showToast("No students selected to export.", "info");
+      return;
+    }
+    const ws = XLSX.utils.json_to_sheet(selectedData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Selected_Students");
+    XLSX.writeFile(wb, `Selected_Students_${new Date().toISOString().split('T')[0]}.csv`, { bookType: 'csv' });
+    showToast(`Exported ${selectedData.length} selected student(s) to CSV!`, "success");
+  };
+
+  const deleteStudent = async (studentOrId?: Student | number) => {
+    if (!studentOrId) return;
+    
+    let targetStudent: Student | undefined;
+    let studentId: number;
+
+    if (typeof studentOrId === 'number') {
+      studentId = studentOrId;
+      targetStudent = allStudents?.find(s => s.id === studentId);
+    } else {
+      targetStudent = studentOrId;
+      studentId = studentOrId.id as number;
+    }
+
+    if (!studentId) return;
+
+    const studentDisplayName = targetStudent ? `${targetStudent.firstName} ${targetStudent.lastName}` : `Student #${studentId}`;
+    const studentIdentifier = targetStudent?.studentId || String(studentId);
+
     confirm({
-      title: "Delete Student",
-      message: "Are you sure you want to delete this student? All their records will be removed from the local database.",
-      confirmLabel: "Delete",
+      title: "Delete Student Record",
+      message: `Are you sure you want to permanently delete ${studentDisplayName} (${studentIdentifier})? This will remove their record from Supabase (cloud database) and the local front-end registry.`,
+      confirmLabel: "Delete Permanently",
       onConfirm: async () => {
         try {
-          await db.students.delete(id);
-          showToast("Student deleted successfully!", "success");
-        } catch (err) {
-          showToast("Failed to delete student", "error");
+          setSelectedStudentIds(prev => prev.filter(id => id !== studentId));
+          await studentsApi.delete(studentId, activeSchool?.id || currentUser?.schoolId, targetStudent?.studentId);
+          showToast(`Student ${studentDisplayName} deleted successfully!`, "success");
+        } catch (err: any) {
+          console.error("Delete student error:", err);
+          showToast(err?.message || "Failed to delete student from database.", "error");
+        }
+      }
+    });
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedStudentIds.length === 0) return;
+    const count = selectedStudentIds.length;
+
+    confirm({
+      title: `Delete ${count} Selected Student${count > 1 ? 's' : ''}`,
+      message: `Are you sure you want to permanently delete ${count} selected student(s)? Their data will be immediately removed from Supabase and the front-end local registry. This action cannot be reversed.`,
+      confirmLabel: `Delete ${count} Student${count > 1 ? 's' : ''}`,
+      onConfirm: async () => {
+        setIsBulkDeleting(true);
+        try {
+          const targetIds = [...selectedStudentIds];
+          setSelectedStudentIds([]);
+          await studentsApi.bulkDelete(targetIds, activeSchool?.id || currentUser?.schoolId);
+          showToast(`Successfully deleted ${count} student(s) from Supabase and local storage!`, "success");
+        } catch (err: any) {
+          console.error("Bulk delete error:", err);
+          showToast(err?.message || "Failed to delete selected students.", "error");
+        } finally {
+          setIsBulkDeleting(false);
         }
       }
     });
@@ -563,24 +963,35 @@ export default function StudentManagement() {
                 <button 
                   onClick={downloadTemplate}
                   className="flex items-center gap-2 px-3 py-2 sm:px-4 bg-white border border-slate-200 rounded-xl text-slate-700 font-medium hover:bg-slate-50 transition-colors text-sm h-11"
-                  title="Download Template"
+                  title="Download CSV Template"
                 >
-                  <FileSpreadsheet className="w-4 h-4" />
-                  <span className="hidden sm:inline">Template</span>
+                  <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                  <span className="hidden sm:inline">CSV Template</span>
                 </button>
                 <input 
                   type="file" 
-                  id="import-excel" 
+                  id="import-csv" 
                   className="hidden" 
-                  accept=".xlsx, .xls"
-                  onChange={importFromExcel}
+                  accept=".csv, text/csv"
+                  onChange={importFromCsv}
                 />
                 <button 
-                  onClick={() => document.getElementById('import-excel')?.click()}
-                  className="flex items-center gap-2 px-3 py-2 sm:px-4 bg-white border border-slate-200 rounded-xl text-slate-700 font-medium hover:bg-slate-50 transition-colors text-sm h-11"
+                  disabled={isImporting}
+                  onClick={() => document.getElementById('import-csv')?.click()}
+                  className="flex items-center gap-2 px-3 py-2 sm:px-4 bg-white border border-slate-200 rounded-xl text-slate-700 font-medium hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm h-11 cursor-pointer"
+                  title="Import CSV File Only"
                 >
-                  <Plus className="w-4 h-4" />
-                  <span className="hidden sm:inline">Import</span>
+                  {isImporting ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-indigo-600/30 border-t-indigo-600 rounded-full animate-spin" />
+                      <span className="hidden sm:inline">Importing CSV...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Plus className="w-4 h-4 text-indigo-600" />
+                      <span className="hidden sm:inline">Import CSV</span>
+                    </>
+                  )}
                 </button>
               </>
             )}
@@ -599,6 +1010,26 @@ export default function StudentManagement() {
               <Printer className="w-4 h-4 text-indigo-600" />
               <span className="hidden sm:inline">Print</span>
             </button>
+            <button 
+              disabled={isBackendSyncing}
+              onClick={() => refreshFromBackend(true)}
+              className="flex items-center gap-2 px-3 py-2 sm:px-4 bg-white border border-indigo-200 text-indigo-700 font-bold hover:bg-indigo-50 transition-colors text-sm h-11 rounded-xl shadow-xs"
+              title="Option C: Query and sync directly with server / Supabase backend"
+            >
+              <RefreshCw className={cn("w-4 h-4 text-indigo-600", isBackendSyncing && "animate-spin")} />
+              <span className="hidden sm:inline">{isBackendSyncing ? "Syncing..." : "Sync Backend"}</span>
+            </button>
+            {isAdmin && (
+              <button 
+                disabled={isBackendPushing}
+                onClick={pushAllLocalToBackend}
+                className="flex items-center gap-2 px-3 py-2 sm:px-4 bg-slate-900 text-white font-bold hover:bg-slate-800 transition-colors text-sm h-11 rounded-xl shadow-xs"
+                title="Option B: Push all local students and records into Supabase backend database"
+              >
+                <UploadCloud className={cn("w-4 h-4 text-emerald-400", isBackendPushing && "animate-pulse")} />
+                <span className="hidden sm:inline">{isBackendPushing ? "Pushing..." : "Push to Database"}</span>
+              </button>
+            )}
           </div>
 
           {isAdmin && (
@@ -611,11 +1042,12 @@ export default function StudentManagement() {
                 <span>Promote Students</span>
               </button>
               <button 
+                id="add-student-btn"
                 onClick={() => {
                   setEditingStudent(null);
                   setIsAddModalOpen(true);
                 }}
-                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 transition-colors shadow-sm h-11 text-sm"
+                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 hover:scale-[1.02] active:scale-[0.98] transition-all shadow-sm h-11 text-sm cursor-pointer"
               >
                 <Plus className="w-4 h-4" />
                 <span>Add Student</span>
@@ -625,11 +1057,72 @@ export default function StudentManagement() {
         </div>
       </div>
 
+      {/* Bulk Action Toolbar */}
+      <AnimatePresence>
+        {selectedStudentIds.length > 0 && (
+          <motion.div 
+            initial={{ opacity: 0, y: -10, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -10, scale: 0.98 }}
+            className="bg-slate-900 text-white rounded-2xl p-4 shadow-lg flex flex-wrap items-center justify-between gap-4 border border-slate-800"
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center font-black text-sm text-white">
+                {selectedStudentIds.length}
+              </div>
+              <div>
+                <div className="font-bold text-sm text-white">
+                  {selectedStudentIds.length} {selectedStudentIds.length === 1 ? 'Student' : 'Students'} Selected
+                </div>
+                <div className="text-xs text-slate-400">
+                  Bulk actions apply directly across Supabase cloud database & local registry
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleClearSelection}
+                className="px-3 py-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-bold text-slate-300 transition-colors cursor-pointer"
+              >
+                Clear Selection
+              </button>
+              <button
+                onClick={exportSelectedToCsv}
+                className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-bold text-white transition-colors cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5 text-indigo-400" />
+                <span>Export CSV ({selectedStudentIds.length})</span>
+              </button>
+              {isAdmin && (
+                <button
+                  onClick={handleBulkDelete}
+                  disabled={isBulkDeleting}
+                  className="flex items-center gap-1.5 px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition-all shadow-sm active:scale-95 disabled:opacity-50 cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>{isBulkDeleting ? 'Deleting...' : `Delete Selected (${selectedStudentIds.length})`}</span>
+                </button>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
         <div className="overflow-x-auto">
           <table className="w-full text-left">
             <thead>
               <tr className="bg-slate-50 border-b border-slate-100">
+                <th className="px-4 py-4 w-12 text-center print:hidden">
+                  <input 
+                    type="checkbox"
+                    checked={filteredStudents && filteredStudents.length > 0 && filteredStudents.every(s => s.id && selectedStudentIds.includes(s.id))}
+                    onChange={handleSelectAll}
+                    className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                    title={filteredStudents && filteredStudents.length > 0 && filteredStudents.every(s => s.id && selectedStudentIds.includes(s.id)) ? "Deselect All" : "Select All Visible"}
+                  />
+                </th>
                 <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Student ID</th>
                 <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Name</th>
                 <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Class</th>
@@ -640,111 +1133,124 @@ export default function StudentManagement() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {filteredStudents?.map((student) => (
-                <tr key={student.id} className="hover:bg-slate-50 transition-colors">
-                  <td className="px-6 py-4">
-                    <span className="font-mono text-sm text-indigo-600 bg-indigo-50 px-2 py-1 rounded">
-                      {student.studentId}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-full bg-slate-100 flex-shrink-0 overflow-hidden border border-slate-200">
-                        {student.photo ? (
-                          <img src={student.photo} alt={`${student.firstName}`} className="w-full h-full object-cover" />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center bg-indigo-50 text-indigo-600 font-bold">
-                            {student.firstName[0]}{student.lastName[0]}
-                          </div>
+              {filteredStudents?.map((student) => {
+                const isSelected = student.id ? selectedStudentIds.includes(student.id) : false;
+                return (
+                  <tr key={student.id} className={cn("hover:bg-slate-50 transition-colors", isSelected && "bg-indigo-50/40 hover:bg-indigo-50/60")}>
+                    <td className="px-4 py-4 w-12 text-center print:hidden">
+                      <input 
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => handleToggleSelect(student.id)}
+                        className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                      />
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className="font-mono text-sm text-indigo-600 bg-indigo-50 px-2 py-1 rounded">
+                        {student.studentId}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-full bg-slate-100 flex-shrink-0 overflow-hidden border border-slate-200">
+                          {student.photo ? (
+                            <img src={student.photo} alt={getStudentFullName(student)} className="w-full h-full object-cover" />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center bg-indigo-50 text-indigo-600 font-bold text-xs uppercase">
+                              {(student.firstName?.[0] || student.first_name?.[0] || '')}{(student.lastName?.[0] || student.last_name?.[0] || '') || 'S'}
+                            </div>
+                          )}
+                        </div>
+                        <div>
+                          <div className="font-medium text-slate-900">{getStudentFullName(student)}</div>
+                          <div className="text-xs text-slate-400">{student.gender || 'N/A'}</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 text-sm text-slate-600 font-medium">
+                      {student.class || 'N/A'}
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="text-sm font-medium text-slate-900">{student.guardianName || '—'}</div>
+                      <div className="text-xs text-slate-500">{student.guardianPhone || '—'}</div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="flex flex-col gap-1">
+                        <div className="w-24 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                          <div 
+                            className={cn(
+                              "h-full rounded-full transition-all duration-500",
+                              ((student.feesPaid || 0) / (student.totalFees || 1)) >= 1 ? "bg-emerald-500" : "bg-amber-500"
+                            )}
+                            style={{ width: `${Math.min(100, Math.max(0, ((student.feesPaid || 0) / (student.totalFees || 1)) * 100))}%` }}
+                          />
+                        </div>
+                        <span className="text-[10px] font-bold text-slate-400 uppercase">
+                          {formatCurrency(student.feesPaid || 0)} / {formatCurrency(student.totalFees || 0)}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className={cn(
+                        "text-xs font-black px-2.5 py-1 rounded-md tracking-tight inline-block",
+                        (student.totalFees || 0) - (student.feesPaid || 0) > 0 
+                          ? "text-rose-700 bg-rose-50 border border-rose-100/60" 
+                          : "text-emerald-700 bg-emerald-50 border border-emerald-100/60"
+                      )}>
+                        {formatCurrency((student.totalFees || 0) - (student.feesPaid || 0))}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 text-right print:hidden">
+                      <div className="flex items-center justify-end gap-1.5">
+                        {/* Profile action - available to all roles */}
+                        <button 
+                          onClick={() => setSelectedProfileStudent(student)}
+                          className="p-2 text-slate-400 hover:text-indigo-600 rounded-lg hover:bg-indigo-50 transition-all flex items-center gap-1 text-xs font-bold cursor-pointer"
+                          title="View Student Profile, Progression & Exam Results"
+                        >
+                          <Eye className="w-4 h-4 text-indigo-500" />
+                          <span className="hidden xl:inline text-slate-600">Profile</span>
+                        </button>
+
+                        {/* Fee Payment action - available to Admins & Accountants */}
+                        {(isAdmin || isAccountant) && (
+                          <button 
+                            onClick={() => setSelectedPaymentStudent(student)}
+                            className="p-2 text-slate-400 hover:text-emerald-600 rounded-lg hover:bg-emerald-50 transition-all flex items-center gap-1 text-xs font-bold cursor-pointer"
+                            title="Record Fee Payment"
+                          >
+                            <CreditCard className="w-4 h-4 text-emerald-500" />
+                            <span className="hidden xl:inline text-slate-600">Fee Pay</span>
+                          </button>
+                        )}
+
+                        {/* Edit and Delete actions - available to Admins */}
+                        {isAdmin && (
+                          <>
+                            <button 
+                              onClick={() => openEditModal(student)}
+                              className="p-2 text-slate-400 hover:text-indigo-600 rounded-lg hover:bg-slate-50 transition-all cursor-pointer"
+                              title="Edit Student Details"
+                            >
+                              <Edit2 className="w-4 h-4" />
+                            </button>
+                            <button 
+                              onClick={() => deleteStudent(student)}
+                              className="p-2 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-slate-50 transition-all cursor-pointer"
+                              title="Delete Student Record"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </>
                         )}
                       </div>
-                      <div>
-                        <div className="font-medium text-slate-900">{student.firstName} {student.lastName}</div>
-                        <div className="text-xs text-slate-400">{student.gender}</div>
-                      </div>
-                    </div>
-                  </td>
-                  <td className="px-6 py-4 text-sm text-slate-600 font-medium">
-                    {student.class}
-                  </td>
-                  <td className="px-6 py-4">
-                    <div className="text-sm font-medium text-slate-900">{student.guardianName}</div>
-                    <div className="text-xs text-slate-500">{student.guardianPhone}</div>
-                  </td>
-                  <td className="px-6 py-4">
-                    <div className="flex flex-col gap-1">
-                      <div className="w-24 h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                        <div 
-                          className={cn(
-                            "h-full rounded-full transition-all duration-500",
-                            (student.feesPaid / student.totalFees) >= 1 ? "bg-emerald-500" : "bg-amber-500"
-                          )}
-                          style={{ width: `${(student.feesPaid / student.totalFees) * 100}%` }}
-                        />
-                      </div>
-                      <span className="text-[10px] font-bold text-slate-400 uppercase">
-                        {formatCurrency(student.feesPaid)} / {formatCurrency(student.totalFees)}
-                      </span>
-                    </div>
-                  </td>
-                  <td className="px-6 py-4">
-                    <span className={cn(
-                      "text-xs font-black px-2.5 py-1 rounded-md tracking-tight inline-block",
-                      student.totalFees - student.feesPaid > 0 
-                        ? "text-rose-700 bg-rose-50 border border-rose-100/60" 
-                        : "text-emerald-700 bg-emerald-50 border border-emerald-100/60"
-                    )}>
-                      {formatCurrency(student.totalFees - student.feesPaid)}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 text-right print:hidden">
-                    <div className="flex items-center justify-end gap-2">
-                      {isAdmin ? (
-                        <>
-                          <button 
-                            onClick={() => openEditModal(student)}
-                            className="p-2 text-slate-400 hover:text-indigo-600 rounded-lg hover:bg-slate-50 transition-all cursor-pointer"
-                            title="Edit Student"
-                          >
-                            <Edit2 className="w-4 h-4" />
-                          </button>
-                          <button 
-                            onClick={() => deleteStudent(student.id)}
-                            className="p-2 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-slate-50 transition-all cursor-pointer"
-                            title="Delete Student"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <button 
-                            onClick={() => setSelectedProfileStudent(student)}
-                            className="p-2 text-slate-400 hover:text-indigo-600 rounded-lg hover:bg-indigo-50 transition-all flex items-center gap-1.5 text-xs font-bold cursor-pointer"
-                            title="View Student Profile"
-                          >
-                            <Eye className="w-4 h-4 text-indigo-500" />
-                            <span className="hidden md:inline">Profile</span>
-                          </button>
-                          {isAccountant && (
-                            <button 
-                              onClick={() => setSelectedPaymentStudent(student)}
-                              className="p-2 text-slate-400 hover:text-emerald-600 rounded-lg hover:bg-emerald-50 transition-all flex items-center gap-1.5 text-xs font-bold cursor-pointer"
-                              title="Quick Fee Payment"
-                            >
-                              <CreditCard className="w-4 h-4 text-emerald-500" />
-                              <span className="hidden md:inline">Fee Pay</span>
-                            </button>
-                          )}
-                        </>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
+                    </td>
+                  </tr>
+                );
+              })}
               {filteredStudents?.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="px-6 py-12 text-center text-slate-500">
+                  <td colSpan={8} className="px-6 py-12 text-center text-slate-500">
                     <div className="flex flex-col items-center gap-3">
                       <Users className="w-12 h-12 text-slate-200" />
                       <p className="font-medium">No students found. Add your first student to get started!</p>
@@ -1149,9 +1655,20 @@ export default function StudentManagement() {
                 </button>
                 <button 
                   type="submit"
-                  className="flex-1 py-3 px-6 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 hover:scale-[1.02] active:scale-[0.98] transition-all shadow-lg shadow-indigo-100"
+                  disabled={isSubmitting}
+                  className="flex-1 py-3 px-6 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 disabled:cursor-not-allowed text-white rounded-xl font-bold hover:scale-[1.02] active:scale-[0.98] transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2 cursor-pointer"
                 >
-                  {editingStudent ? 'Update Details' : 'Register Student'}
+                  {isSubmitting ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      <span>Saving to Supabase...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-4 h-4" />
+                      <span>{editingStudent ? 'Update Details' : 'Register Student'}</span>
+                    </>
+                  )}
                 </button>
               </div>
             </form>
@@ -1172,7 +1689,7 @@ export default function StudentManagement() {
               {/* Profile Header */}
               <div className="p-6 bg-gradient-to-r from-indigo-600 to-indigo-700 text-white flex items-center justify-between">
                 <div className="flex items-center gap-4">
-                  <div className="w-16 h-16 rounded-2xl bg-white/10 flex items-center justify-center overflow-hidden border-2 border-white/20">
+                  <div className="w-16 h-16 rounded-2xl bg-white/10 flex items-center justify-center overflow-hidden border-2 border-white/20 shrink-0">
                     {selectedProfileStudent.photo ? (
                       <img src={selectedProfileStudent.photo} alt="Avatar" className="w-full h-full object-cover" />
                     ) : (
@@ -1181,94 +1698,298 @@ export default function StudentManagement() {
                   </div>
                   <div>
                     <h3 className="text-xl font-bold">{selectedProfileStudent.firstName} {selectedProfileStudent.lastName}</h3>
-                    <p className="text-xs text-indigo-200 font-mono tracking-wider">{selectedProfileStudent.studentId}</p>
+                    <div className="flex items-center gap-2 mt-1">
+                      <span className="text-xs text-indigo-200 font-mono tracking-wider">{selectedProfileStudent.studentId}</span>
+                      <span className="text-[11px] font-bold px-2 py-0.5 bg-white/20 rounded-full text-white">Active: {selectedProfileStudent.class}</span>
+                    </div>
                   </div>
                 </div>
                 <button 
                   onClick={() => setSelectedProfileStudent(null)}
-                  className="p-1 px-3 bg-white/10 hover:bg-white/20 rounded-lg text-sm font-bold transition-all cursor-pointer"
+                  className="p-1.5 px-3 bg-white/10 hover:bg-white/20 rounded-xl text-xs font-bold transition-all cursor-pointer"
                 >
                   Close
                 </button>
               </div>
 
-              {/* Profile Details */}
-              <div className="p-6 overflow-y-auto space-y-6">
-                <div className="grid grid-cols-2 gap-6">
-                  <div>
-                    <span className="text-xs font-bold text-slate-400 uppercase">Class Room</span>
-                    <p className="text-base font-bold text-slate-800">{selectedProfileStudent.class}</p>
-                  </div>
-                  <div>
-                    <span className="text-xs font-bold text-slate-400 uppercase">Gender</span>
-                    <p className="text-base font-bold text-slate-800">{selectedProfileStudent.gender || 'N/A'}</p>
-                  </div>
-                  <div>
-                    <span className="text-xs font-bold text-slate-400 uppercase">Date of Birth</span>
-                    <p className="text-base font-bold text-slate-800">{selectedProfileStudent.dateOfBirth || 'N/A'}</p>
-                  </div>
-                  <div>
-                    <span className="text-xs font-bold text-slate-400 uppercase">House Designation</span>
-                    <p className="text-base font-bold text-slate-800">{selectedProfileStudent.house || 'None'}</p>
-                  </div>
-                </div>
+              {/* Profile Tabs Navigation */}
+              <div className="flex border-b border-slate-100 bg-slate-50/50 px-6 gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setProfileModalTab('details')}
+                  className={cn(
+                    "pb-3 px-3 text-xs font-bold transition-all border-b-2 cursor-pointer",
+                    profileModalTab === 'details'
+                      ? "border-indigo-600 text-indigo-600"
+                      : "border-transparent text-slate-500 hover:text-slate-700"
+                  )}
+                >
+                  Overview & Fees
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setProfileModalTab('progression')}
+                  className={cn(
+                    "pb-3 px-3 text-xs font-bold transition-all border-b-2 cursor-pointer flex items-center gap-1.5",
+                    profileModalTab === 'progression'
+                      ? "border-indigo-600 text-indigo-600"
+                      : "border-transparent text-slate-500 hover:text-slate-700"
+                  )}
+                >
+                  <History className="w-3.5 h-3.5" />
+                  <span>Class Progression</span>
+                  {((selectedProfileStudent.classHistory?.length || 0) + (profileStudentPromotions?.length || 0)) > 0 && (
+                    <span className="px-1.5 py-0.2 bg-indigo-100 text-indigo-700 rounded-full text-[10px]">
+                      {(selectedProfileStudent.classHistory?.length || profileStudentPromotions?.length || 0)}
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setProfileModalTab('results')}
+                  className={cn(
+                    "pb-3 px-3 text-xs font-bold transition-all border-b-2 cursor-pointer flex items-center gap-1.5",
+                    profileModalTab === 'results'
+                      ? "border-indigo-600 text-indigo-600"
+                      : "border-transparent text-slate-500 hover:text-slate-700"
+                  )}
+                >
+                  <Award className="w-3.5 h-3.5" />
+                  <span>Results History</span>
+                  {profileStudentResults.length > 0 && (
+                    <span className="px-1.5 py-0.2 bg-indigo-100 text-indigo-700 rounded-full text-[10px]">
+                      {profileStudentResults.length}
+                    </span>
+                  )}
+                </button>
+              </div>
 
-                <div className="border-t border-slate-100 pt-6">
-                  <h4 className="text-xs font-bold text-indigo-600 uppercase tracking-widest mb-4">Parental Contacts</h4>
-                  <div className="grid grid-cols-2 gap-6">
+              {/* Tab Content */}
+              <div className="p-6 overflow-y-auto space-y-6 max-h-[calc(90vh-180px)]">
+                {profileModalTab === 'details' && (
+                  <>
+                    <div className="grid grid-cols-2 gap-6">
+                      <div>
+                        <span className="text-xs font-bold text-slate-400 uppercase">Current Class</span>
+                        <p className="text-base font-bold text-slate-800">{selectedProfileStudent.class}</p>
+                      </div>
+                      <div>
+                        <span className="text-xs font-bold text-slate-400 uppercase">Gender</span>
+                        <p className="text-base font-bold text-slate-800">{selectedProfileStudent.gender || 'N/A'}</p>
+                      </div>
+                      <div>
+                        <span className="text-xs font-bold text-slate-400 uppercase">Date of Birth</span>
+                        <p className="text-base font-bold text-slate-800">{selectedProfileStudent.dateOfBirth || 'N/A'}</p>
+                      </div>
+                      <div>
+                        <span className="text-xs font-bold text-slate-400 uppercase">House Designation</span>
+                        <p className="text-base font-bold text-slate-800">{selectedProfileStudent.house || 'None'}</p>
+                      </div>
+                    </div>
+
+                    <div className="border-t border-slate-100 pt-6">
+                      <h4 className="text-xs font-bold text-indigo-600 uppercase tracking-widest mb-4">Parental Contacts</h4>
+                      <div className="grid grid-cols-2 gap-6">
+                        <div>
+                          <span className="text-xs font-bold text-slate-400 uppercase">Guardian Name</span>
+                          <p className="text-base font-bold text-slate-800">{selectedProfileStudent.guardianName}</p>
+                        </div>
+                        <div>
+                          <span className="text-xs font-bold text-slate-400 uppercase">Contact Handset</span>
+                          <p className="text-base font-bold text-indigo-600 font-mono">{selectedProfileStudent.guardianPhone}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="border-t border-slate-100 pt-6">
+                      <h4 className="text-xs font-bold text-indigo-600 uppercase tracking-widest mb-4">Active Term Financial Standing</h4>
+                      <div className="grid grid-cols-3 gap-4">
+                        <div className="p-4 bg-slate-50 rounded-2xl">
+                          <span className="text-[10px] font-bold text-slate-400 uppercase">Billed Amount</span>
+                          <p className="text-sm font-bold text-slate-800 mt-1">{formatCurrency(selectedProfileStudent.totalFees)}</p>
+                        </div>
+                        <div className="p-4 bg-emerald-50 rounded-2xl">
+                          <span className="text-[10px] font-bold text-emerald-600 uppercase">Total Paid</span>
+                          <p className="text-sm font-bold text-emerald-700 mt-1">{formatCurrency(selectedProfileStudent.feesPaid)}</p>
+                        </div>
+                        <div className={cn(
+                          "p-4 rounded-2xl",
+                          selectedProfileStudent.totalFees - selectedProfileStudent.feesPaid > 0 ? "bg-rose-50" : "bg-emerald-50"
+                        )}>
+                          <span className={cn(
+                            "text-[10px] font-bold uppercase",
+                            selectedProfileStudent.totalFees - selectedProfileStudent.feesPaid > 0 ? "text-rose-600" : "text-emerald-600"
+                          )}>Outstanding</span>
+                          <p className={cn(
+                            "text-sm font-bold mt-1",
+                            selectedProfileStudent.totalFees - selectedProfileStudent.feesPaid > 0 ? "text-rose-700" : "text-emerald-700"
+                          )}>{formatCurrency(selectedProfileStudent.totalFees - selectedProfileStudent.feesPaid)}</p>
+                        </div>
+                      </div>
+
+                      <div className="mt-4 border border-slate-150 rounded-xl overflow-hidden bg-slate-50/50 p-4">
+                        <p className="text-[10px] font-bold text-indigo-600 uppercase mb-3 tracking-wider">Itemized Bill Breakdown</p>
+                        <div className="space-y-2 max-h-[160px] overflow-y-auto pr-1">
+                          {feeTypes.map(ft => {
+                            const amount = selectedProfileStudent.feeBreakdown?.[ft.id] ?? (ft.id === 'tuition' ? selectedProfileStudent.totalFees : 0);
+                            if (amount === 0) return null;
+                            return (
+                              <div key={ft.id} className="flex justify-between items-center text-xs py-1 border-b border-slate-100 last:border-0">
+                                <span className="text-slate-600 font-medium">{ft.label}</span>
+                                <span className="font-bold text-slate-800 font-mono">{formatCurrency(amount)}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {profileModalTab === 'progression' && (
+                  <div className="space-y-6">
+                    {/* Active Class Highlight */}
+                    <div className="p-4 bg-indigo-50/70 border border-indigo-100 rounded-2xl flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center font-bold">
+                          <GraduationCap className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <p className="text-xs font-bold text-indigo-500 uppercase tracking-wider">Current Active Class</p>
+                          <p className="text-base font-black text-slate-800">{selectedProfileStudent.class}</p>
+                        </div>
+                      </div>
+                      <span className="px-3 py-1 bg-emerald-100 text-emerald-800 rounded-full text-xs font-bold flex items-center gap-1">
+                        <Check className="w-3.5 h-3.5" /> Enrolled
+                      </span>
+                    </div>
+
+                    {/* Historical Class Roster Timeline */}
                     <div>
-                      <span className="text-xs font-bold text-slate-400 uppercase">Guardian Name</span>
-                      <p className="text-base font-bold text-slate-800">{selectedProfileStudent.guardianName}</p>
-                    </div>
-                    <div>
-                      <span className="text-xs font-bold text-slate-400 uppercase">Contact Handset</span>
-                      <p className="text-base font-bold text-indigo-600 font-mono">{selectedProfileStudent.guardianPhone}</p>
-                    </div>
-                  </div>
-                </div>
+                      <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2">
+                        <History className="w-4 h-4 text-indigo-600" />
+                        <span>Academic Progression Timeline</span>
+                      </h4>
 
-                 <div className="border-t border-slate-100 pt-6">
-                  <h4 className="text-xs font-bold text-indigo-600 uppercase tracking-widest mb-4">Financial Overview</h4>
-                  <div className="grid grid-cols-3 gap-4">
-                    <div className="p-4 bg-slate-50 rounded-2xl">
-                      <span className="text-[10px] font-bold text-slate-400 uppercase">Billed Amount</span>
-                      <p className="text-sm font-bold text-slate-800 mt-1">{formatCurrency(selectedProfileStudent.totalFees)}</p>
-                    </div>
-                    <div className="p-4 bg-emerald-50 rounded-2xl">
-                      <span className="text-[10px] font-bold text-emerald-600 uppercase">Total Paid</span>
-                      <p className="text-sm font-bold text-emerald-700 mt-1">{formatCurrency(selectedProfileStudent.feesPaid)}</p>
-                    </div>
-                    <div className={cn(
-                      "p-4 rounded-2xl",
-                      selectedProfileStudent.totalFees - selectedProfileStudent.feesPaid > 0 ? "bg-rose-50" : "bg-emerald-50"
-                    )}>
-                      <span className={cn(
-                        "text-[10px] font-bold uppercase",
-                        selectedProfileStudent.totalFees - selectedProfileStudent.feesPaid > 0 ? "text-rose-600" : "text-emerald-600"
-                      )}>Outstanding</span>
-                      <p className={cn(
-                        "text-sm font-bold mt-1",
-                        selectedProfileStudent.totalFees - selectedProfileStudent.feesPaid > 0 ? "text-rose-700" : "text-emerald-700"
-                      )}>{formatCurrency(selectedProfileStudent.totalFees - selectedProfileStudent.feesPaid)}</p>
-                    </div>
-                  </div>
-
-                  <div className="mt-4 border border-slate-150 rounded-xl overflow-hidden bg-slate-50/50 p-4">
-                    <p className="text-[10px] font-bold text-indigo-600 uppercase mb-3 tracking-wider">Itemized Bill Breakdown</p>
-                    <div className="space-y-2 max-h-[160px] overflow-y-auto pr-1">
-                      {feeTypes.map(ft => {
-                        const amount = selectedProfileStudent.feeBreakdown?.[ft.id] ?? (ft.id === 'tuition' ? selectedProfileStudent.totalFees : 0);
-                        if (amount === 0) return null;
-                        return (
-                          <div key={ft.id} className="flex justify-between items-center text-xs py-1 border-b border-slate-100 last:border-0">
-                            <span className="text-slate-600 font-medium">{ft.label}</span>
-                            <span className="font-bold text-slate-800 font-mono">{formatCurrency(amount)}</span>
+                      {((selectedProfileStudent.classHistory && selectedProfileStudent.classHistory.length > 0) || profileStudentPromotions.length > 0) ? (
+                        <div className="relative border-l-2 border-indigo-200 ml-4 pl-6 space-y-6 py-2">
+                          {/* Current Class Node */}
+                          <div className="relative">
+                            <div className="absolute -left-[31px] top-1 w-4 h-4 rounded-full bg-indigo-600 border-2 border-white shadow-sm ring-2 ring-indigo-200" />
+                            <div className="p-4 bg-white border border-slate-200 rounded-2xl shadow-xs">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-sm font-bold text-slate-800">{selectedProfileStudent.class}</span>
+                                <span className="text-[10px] font-bold px-2 py-0.5 bg-indigo-50 text-indigo-600 rounded-md">Present Class</span>
+                              </div>
+                              <p className="text-xs text-slate-500">Currently active academic standing</p>
+                            </div>
                           </div>
-                        );
-                      })}
+
+                          {/* Historical Class Nodes */}
+                          {selectedProfileStudent.classHistory?.map((hist, idx) => (
+                            <div key={idx} className="relative">
+                              <div className="absolute -left-[31px] top-1 w-4 h-4 rounded-full bg-slate-400 border-2 border-white shadow-sm" />
+                              <div className="p-4 bg-slate-50/80 border border-slate-200/80 rounded-2xl space-y-2">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-sm font-bold text-slate-700">{hist.class}</span>
+                                  <span className="text-[11px] font-bold text-slate-500 font-mono">{hist.academicYear} • {hist.term}</span>
+                                </div>
+                                <div className="grid grid-cols-2 gap-2 text-xs text-slate-600 bg-white p-2.5 rounded-xl border border-slate-100">
+                                  <div>
+                                    <span className="text-[10px] font-bold text-slate-400 uppercase">Archived Billed:</span>
+                                    <p className="font-bold text-slate-800">{formatCurrency(hist.totalFees || 0)}</p>
+                                  </div>
+                                  <div>
+                                    <span className="text-[10px] font-bold text-emerald-600 uppercase">Archived Paid:</span>
+                                    <p className="font-bold text-emerald-700">{formatCurrency(hist.feesPaid || 0)}</p>
+                                  </div>
+                                </div>
+                                {hist.promotedAt && (
+                                  <p className="text-[10px] text-slate-400">Promoted on {new Date(hist.promotedAt).toLocaleDateString()}</p>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+
+                          {/* Fallback to promotion history if classHistory not populated */}
+                          {(!selectedProfileStudent.classHistory || selectedProfileStudent.classHistory.length === 0) && profileStudentPromotions.map((promo, idx) => (
+                            <div key={idx} className="relative">
+                              <div className="absolute -left-[31px] top-1 w-4 h-4 rounded-full bg-slate-400 border-2 border-white shadow-sm" />
+                              <div className="p-4 bg-slate-50/80 border border-slate-200/80 rounded-2xl space-y-2">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-sm font-bold text-slate-700">{promo.sourceClass} ➔ {promo.destClass}</span>
+                                  <span className="text-[11px] font-bold text-slate-500 font-mono">{promo.academicYear}</span>
+                                </div>
+                                <div className="grid grid-cols-2 gap-2 text-xs text-slate-600 bg-white p-2.5 rounded-xl border border-slate-100">
+                                  <div>
+                                    <span className="text-[10px] font-bold text-slate-400 uppercase">Archived Billed:</span>
+                                    <p className="font-bold text-slate-800">{formatCurrency(promo.previousTotalFees || 0)}</p>
+                                  </div>
+                                  <div>
+                                    <span className="text-[10px] font-bold text-emerald-600 uppercase">Archived Paid:</span>
+                                    <p className="font-bold text-emerald-700">{formatCurrency(promo.previousFeesPaid || 0)}</p>
+                                  </div>
+                                </div>
+                                <p className="text-[10px] text-slate-400">Promoted on {new Date(promo.timestamp).toLocaleDateString()}</p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="p-6 bg-slate-50 rounded-2xl text-center border border-slate-150">
+                          <p className="text-xs font-bold text-slate-600">First Academic Session Enrolled</p>
+                          <p className="text-xs text-slate-400 mt-1">This student is in their inaugural class ({selectedProfileStudent.class}). Subsequent promotions across academic years will be safely logged here.</p>
+                        </div>
+                      )}
                     </div>
                   </div>
-                </div>
+                )}
+
+                {profileModalTab === 'results' && (
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs font-bold text-indigo-600 uppercase tracking-widest">Historical Exam Results</h4>
+                      <span className="text-xs font-bold text-slate-500 font-mono">{profileStudentResults.length} records found</span>
+                    </div>
+
+                    {profileStudentResults.length > 0 ? (
+                      <div className="border border-slate-200 rounded-2xl overflow-hidden">
+                        <table className="w-full text-left text-xs">
+                          <thead className="bg-slate-50 text-slate-600 font-bold border-b border-slate-200">
+                            <tr>
+                              <th className="py-2.5 px-3">Class & Term</th>
+                              <th className="py-2.5 px-3">Subject</th>
+                              <th className="py-2.5 px-3 text-center">Score (100%)</th>
+                              <th className="py-2.5 px-3 text-center">Grade</th>
+                              <th className="py-2.5 px-3">Remarks</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {profileStudentResults.map((res, i) => (
+                              <tr key={i} className="hover:bg-slate-50/50">
+                                <td className="py-2 px-3 font-semibold text-slate-800">{res.class || selectedProfileStudent.class} • {res.term}</td>
+                                <td className="py-2 px-3 text-slate-700">{res.subject}</td>
+                                <td className="py-2 px-3 text-center font-mono font-bold text-slate-900">{res.totalScore}</td>
+                                <td className="py-2 px-3 text-center">
+                                  <span className="px-2 py-0.5 bg-indigo-50 text-indigo-700 font-bold rounded-md text-[11px] font-mono">
+                                    {res.grade}
+                                  </span>
+                                </td>
+                                <td className="py-2 px-3 text-slate-500 italic">{res.remarks || 'Pass'}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <div className="p-8 bg-slate-50 rounded-2xl text-center border border-slate-150">
+                        <BookOpen className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                        <p className="text-xs font-bold text-slate-600">No Terminal Exam Results Recorded Yet</p>
+                        <p className="text-xs text-slate-400 mt-1">Scores entered via the Results Terminal for any term or class are permanently retained and will display here.</p>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </motion.div>
           </div>
@@ -1508,6 +2229,17 @@ export default function StudentManagement() {
                   </div>
                 </div>
 
+                {/* Safe Transition Guarantee Notice */}
+                <div className="p-3.5 bg-emerald-50/90 border border-emerald-200/90 rounded-2xl flex items-start gap-3">
+                  <ShieldCheck className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                  <div className="text-xs text-emerald-800 space-y-0.5">
+                    <p className="font-bold">Permanent Historical Data Guarantee</p>
+                    <p className="text-emerald-700/90 leading-relaxed">
+                      Promoting students moves their active enrollment to the next class. All previous terminal exam results, attendance logs, and past fee records are permanently retained in the database.
+                    </p>
+                  </div>
+                </div>
+
                 {/* Promotion Configurations */}
                 <div className="bg-slate-50/50 p-4 rounded-2xl border border-slate-100 space-y-4">
                   <p className="text-xs font-black text-slate-400 uppercase tracking-widest">Promotion & Year Configurations</p>
@@ -1520,8 +2252,8 @@ export default function StudentManagement() {
                       className="w-4 h-4 text-emerald-600 border-slate-300 rounded focus:ring-emerald-500 mt-0.5 accent-emerald-600"
                     />
                     <div>
-                      <p className="text-sm font-bold text-slate-700 leading-none">Reset Fees Paid to GHS 0.00</p>
-                      <p className="text-xs text-slate-500 mt-1">Clears previous term fee payments to start fresh in the new class.</p>
+                      <p className="text-sm font-bold text-slate-700 leading-none">Start New Session with Fresh GHS 0.00 Active Balance</p>
+                      <p className="text-xs text-slate-500 mt-1">Safely archives previous class payment totals in student history and starts a fresh ledger for the new class.</p>
                     </div>
                   </label>
 

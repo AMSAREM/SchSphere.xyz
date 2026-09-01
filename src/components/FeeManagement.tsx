@@ -5,6 +5,7 @@ import { Wallet, CreditCard, History, Search, ArrowUpRight, Download, X, Check, 
 import { formatCurrency, cn, exportToPDF, triggerPrint } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import { useNotifications } from '../contexts/NotificationContext';
+import { studentsApi } from '../lib/api';
 import * as XLSX from 'xlsx';
 import PaystackPaymentButton from './PaystackPaymentButton';
 import { useAuth } from '../contexts/AuthContext';
@@ -491,7 +492,7 @@ export default function FeeManagement() {
       updatedPaid[allocationType] = (updatedPaid[allocationType] || 0) + amount;
     }
 
-    await db.students.update(selectedStudent.id, {
+    await studentsApi.update(selectedStudent.id, {
       feesPaid: selectedStudent.feesPaid + amount,
       feePaidBreakdown: updatedPaid
     });

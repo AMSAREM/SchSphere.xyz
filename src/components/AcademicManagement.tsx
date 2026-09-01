@@ -12,6 +12,12 @@ export default function AcademicManagement() {
   const settings = useLiveQuery(() => db.settings.toArray()) || [];
   const schoolName = settings.find(s => s.key === 'schoolProfile')?.value?.schoolName || 'ESEPA INTERNATIONAL SCHOOL';
 
+  React.useEffect(() => {
+    teachersApi.getAll().catch(() => {});
+    classesApi.getAll().catch(() => {});
+    subjectsApi.getAll().catch(() => {});
+  }, []);
+
   return (
     <div className="space-y-6">
       {/* Print Only Header */}
@@ -129,7 +135,10 @@ function TeacherList() {
     };
 
     if (editingTeacher && editingTeacher.id) {
-      await teachersApi.update(editingTeacher.id, teacherData);
+      await teachersApi.update(editingTeacher.id, {
+        ...teacherData,
+        staffId: editingTeacher.staffId
+      });
     } else {
       const teacher: Teacher = {
         ...teacherData,
@@ -175,8 +184,8 @@ function TeacherList() {
           <div key={teacher.id} className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
             <div>
               <div className="flex justify-between items-start mb-4">
-                <div className="w-12 h-12 bg-indigo-50 rounded-full flex items-center justify-center text-indigo-600 font-bold">
-                  {teacher.firstName[0]}{teacher.lastName[0]}
+                <div className="w-12 h-12 bg-indigo-50 rounded-full flex items-center justify-center text-indigo-600 font-bold uppercase">
+                  {(teacher.firstName?.[0] || '')}{(teacher.lastName?.[0] || '') || 'T'}
                 </div>
                 <div className="flex gap-2">
                   <button 
@@ -296,8 +305,8 @@ function TeacherList() {
               </div>
 
               <div className="flex gap-4 pt-6">
-                <button type="button" onClick={() => setIsModalOpen(false)} className="flex-1 py-3 border border-slate-200 rounded-xl font-bold text-slate-600 hover:bg-slate-50">Cancel</button>
-                <button type="submit" className="flex-1 py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 shadow-lg shadow-indigo-100">Save Teacher</button>
+                <button type="button" onClick={() => setIsModalOpen(false)} className="flex-1 py-3 border border-slate-200 rounded-xl font-bold text-slate-600 hover:bg-slate-50 cursor-pointer">Cancel</button>
+                <button id="teacher-submit-btn" type="submit" className="flex-1 py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 shadow-lg shadow-indigo-100 cursor-pointer transition-all active:scale-[0.99]">{editingTeacher ? 'Update Teacher' : 'Save Teacher'}</button>
               </div>
             </form>
           </div>
@@ -416,13 +425,16 @@ function ClassList() {
 
 function SubjectList() {
   const [searchTerm, setSearchTerm] = useState('');
-  const subjects = useLiveQuery(() => 
-    db.subjects.filter(s => 
-      s.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      s.code.toLowerCase().includes(searchTerm.toLowerCase())
-    ).toArray(),
-    [searchTerm]
-  );
+  const subjects = useLiveQuery(() => {
+    const search = (searchTerm || '').toLowerCase().trim();
+    return db.subjects.filter(s => {
+      if (!s) return false;
+      if (!search) return true;
+      const name = (s.name || '').toLowerCase();
+      const code = (s.code || '').toLowerCase();
+      return name.includes(search) || code.includes(search);
+    }).toArray();
+  }, [searchTerm]);
   const classes = useLiveQuery(() => db.classes.toArray());
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingSubject, setEditingSubject] = useState<Subject | null>(null);

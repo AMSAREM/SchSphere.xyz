@@ -13,6 +13,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 import { useNotifications } from '../contexts/NotificationContext';
+import { syncTenantAcademicData } from '../lib/api';
 
 export interface Tenant {
   id: string;
@@ -125,6 +126,11 @@ export default function TenantSwitcher({
 
     if (onSwitchTenant) {
       onSwitchTenant(tenant);
+    }
+
+    // Proactively hydrate tenant academic data from Supabase/Server
+    if (tenant.id) {
+      syncTenantAcademicData(tenant.id).catch(e => console.warn('Academic data sync notice:', e));
     }
 
     showToast(`Switched active tenant to ${tenant.name || tenant.schoolName}`, 'success');
